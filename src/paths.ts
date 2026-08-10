@@ -8,6 +8,8 @@ export const BUILT_IN_SYNC_FILES = [
 	"skills",
 	"prompts",
 	"themes",
+	"extensions",
+	"extension-settings",
 ] as const;
 
 export type BuiltInSyncFile = (typeof BUILT_IN_SYNC_FILES)[number];

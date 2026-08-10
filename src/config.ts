@@ -14,7 +14,16 @@ export interface SyncConfig {
 export const DEFAULT_CONFIG: SyncConfig = {
 	remote: "",
 	branch: "pi-sync",
-	include: ["settings.json", "keybindings.json", "models.json", "skills", "prompts", "themes"],
+	include: [
+		"settings.json",
+		"keybindings.json",
+		"models.json",
+		"skills",
+		"prompts",
+		"themes",
+		"extensions",
+		"extension-settings",
+	],
 	automatic: true,
 };
 

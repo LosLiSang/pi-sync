@@ -52,13 +52,15 @@ The config lives at `~/.pi/agent/pi-sync.json` (agent dir honors `PI_CODING_AGEN
 		"models.json",
 		"skills",
 		"prompts",
-		"themes"
+		"themes",
+		"extensions",
+		"extension-settings"
 	],
 	"automatic": true
 }
 ```
 
-- `include` selects which agent-dir paths sync. Sessions, extensions, and `AGENTS.md` are intentionally not included by default.
+- `include` selects which agent-dir paths sync. The defaults are `settings.json`, `keybindings.json`, `models.json`, `skills`, `prompts`, `themes`, `extensions`, and `extension-settings`. Sessions and `AGENTS.md` are intentionally not included by default.
 - State lives under `<agent-dir>/pi-sync/` (a mirror git repo, `state.json`, and backups).
 
 ## 🗂️ Package layout

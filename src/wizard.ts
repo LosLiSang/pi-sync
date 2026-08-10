@@ -9,6 +9,8 @@ const INCLUDE_CHOICES = [
 	"skills",
 	"prompts",
 	"themes",
+	"extensions",
+	"extension-settings",
 ];
 
 /**

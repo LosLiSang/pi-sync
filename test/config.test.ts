@@ -30,6 +30,8 @@ test("loadConfig returns defaults when no config file exists", async () => {
 		"skills",
 		"prompts",
 		"themes",
+		"extensions",
+		"extension-settings",
 	]);
 	assert.equal(config.automatic, true);
 });
