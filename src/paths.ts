@@ -23,25 +23,11 @@ export function agentDir(): string {
 	return getAgentDir();
 }
 
-/** Absolute source path for one include entry. Returns undefined for unknown entries. */
-export function syncRootPath(entry: string): string | undefined {
-	const root = getAgentDir();
-	switch (entry) {
-		case "settings.json":
-			return path.join(root, "settings.json");
-		case "keybindings.json":
-			return path.join(root, "keybindings.json");
-		case "models.json":
-			return path.join(root, "models.json");
-		case "skills":
-			return path.join(root, "skills");
-		case "prompts":
-			return path.join(root, "prompts");
-		case "themes":
-			return path.join(root, "themes");
-		default:
-			return undefined;
-	}
+/** Absolute source path for one include entry (built-in or arbitrary agent-relative). */
+export function syncRootPath(entry: string): string {
+	// normalizeInclude validates entries as safe agent-relative posix paths, so a
+	// plain join keeps every entry inside the agent directory.
+	return path.join(getAgentDir(), entry);
 }
 
 export function isBuiltInTopLevelFile(name: string): boolean {

@@ -37,7 +37,6 @@ export async function createSnapshot(config: SyncConfig): Promise<Snapshot> {
 	const seen = new Set<string>();
 	for (const entry of config.include) {
 		const root = syncRootPath(entry);
-		if (!root) continue;
 		await collectFiles(root, agentDir(), files, seen, entry);
 	}
 	files.sort((left, right) => left.path.localeCompare(right.path));

@@ -179,3 +179,23 @@ async function simulateRemotePush(content: string): Promise<void> {
 	await runGit(["push", "--quiet", "origin", "HEAD:pi-sync"], { cwd: cloneDir });
 	await rmSync(cloneDir, { recursive: true, force: true });
 }
+
+test("arbitrary agent-relative include entries push and pull", async () => {
+	writeAgentFile("AGENTS.md", "# instructions\n");
+	writeAgentFile("prompts/teach.md", "# teach\n");
+	const cfg = await config({ include: ["AGENTS.md", "prompts/teach.md"] });
+	await operations.push(ctx(), cfg);
+
+	// Fresh machine pulls both files back.
+	rmSync(path.join(home, ".pi", "agent", "AGENTS.md"), { force: true });
+	rmSync(path.join(home, ".pi", "agent", "prompts"), { recursive: true, force: true });
+	await operations.pull(ctx(), cfg);
+	assert.equal(
+		require("node:fs").readFileSync(path.join(home, ".pi", "agent", "AGENTS.md"), "utf8"),
+		"# instructions\n",
+	);
+	assert.equal(
+		require("node:fs").readFileSync(path.join(home, ".pi", "agent", "prompts", "teach.md"), "utf8"),
+		"# teach\n",
+	);
+});

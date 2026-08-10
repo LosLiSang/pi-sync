@@ -67,3 +67,16 @@ test("createSnapshot hashes are stable across identical content", async () => {
 	const second = await createSnapshot(CONFIG);
 	assert.equal(fileHashMap(first).get("settings.json"), fileHashMap(second).get("settings.json"));
 });
+
+test("createSnapshot captures arbitrary agent-relative include entries", async () => {
+	mkdirSync(agentDir(), { recursive: true });
+	mkdirSync(path.join(agentDir(), "prompts"), { recursive: true });
+	writeFileSync(path.join(agentDir(), "AGENTS.md"), "# instructions\n");
+	writeFileSync(path.join(agentDir(), "prompts", "teach.md"), "# teach\n");
+
+	const config: SyncConfig = { ...CONFIG, include: ["AGENTS.md", "prompts/teach.md"] };
+	const snapshot = await createSnapshot(config);
+	const hashes = fileHashMap(snapshot);
+	assert.deepEqual([...hashes.keys()].sort(), ["AGENTS.md", "prompts/teach.md"]);
+	assert.equal(snapshotFileContent(snapshot, "AGENTS.md"), "# instructions\n");
+});

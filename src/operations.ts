@@ -250,7 +250,6 @@ function resolveSnapshotTarget(relativePath: string, config: SyncConfig): string
 	});
 	if (!entry) return undefined;
 	const root = syncRootPath(entry);
-	if (!root) return undefined;
 	const suffix = relativePath.slice(entry.length);
 	return path.join(root, suffix);
 }
