@@ -1,0 +1,3 @@
+# Force LF line endings in the working copy and repo (Windows checkout
+# churn with core.autocrlf=true kept breaking biome's LF expectations).
+* text=auto eol=lf
