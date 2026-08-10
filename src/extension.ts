@@ -3,8 +3,9 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { loadConfig, type SyncConfig } from "./config.js";
+import { addIncludeItems, loadConfig, type SyncConfig, saveConfig } from "./config.js";
 import { readRemoteSnapshot, readSnapshotAt } from "./git.js";
+import { runIncludePicker } from "./include.js";
 import { planMerge } from "./merge.js";
 import * as operations from "./operations.js";
 import { createSnapshot } from "./snapshot.js";
@@ -26,6 +27,7 @@ const COMMANDS = [
 	"fetch",
 	"merge",
 	"history",
+	"include",
 	"config",
 	"help",
 ] as const;
@@ -46,6 +48,7 @@ const USAGE = [
 	"  push                publish local snapshot (--force overwrites remote changes)",
 	"  pull                overwrite local files with the remote snapshot",
 	"  history             list recent remote snapshot commits",
+	"  include             pick agent-dir files/dirs to sync (or pass paths)",
 	"  config              show the effective config",
 	"  help                show this help",
 ].join("\n");
@@ -246,6 +249,24 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 		case "history":
 			await operations.history(ctx, config);
 			return;
+		case "include": {
+			const items = restTokens.filter((token) => token !== "--force");
+			if (items.length > 0) {
+				try {
+					const updated = addIncludeItems(config, items);
+					await saveConfig(updated);
+					ctx.ui.notify(
+						`Saved. include (${updated.include.length}): ${updated.include.join(", ") || "none"}`,
+						"info",
+					);
+				} catch (error) {
+					ctx.ui.notify(errorMessage(error), "error");
+				}
+			} else {
+				await runIncludePicker(ctx.ui, config);
+			}
+			return;
+		}
 		case "config":
 			ctx.ui.notify(
 				[

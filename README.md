@@ -36,6 +36,8 @@ pi install npm:@loslisang/pi-sync
 /sync push        # publish local snapshot (--force overwrites remote changes)
 /sync pull        # overwrite local files with the remote snapshot
 /sync history     # list recent remote snapshot commits
+/sync include     # pick agent-dir files/dirs to sync, or /sync include <path>…
+/sync config      # show the effective config
 ```
 
 ## ⚙️ Settings
@@ -60,7 +62,7 @@ The config lives at `~/.pi/agent/pi-sync.json` (agent dir honors `PI_CODING_AGEN
 }
 ```
 
-- `include` selects which agent-dir paths sync. The defaults are `settings.json`, `keybindings.json`, `models.json`, `skills`, `prompts`, `themes`, `extensions`, and `extension-settings`. Sessions and `AGENTS.md` are intentionally not included by default.
+- `include` selects which agent-dir paths sync. The defaults are `settings.json`, `keybindings.json`, `models.json`, `skills`, `prompts`, `themes`, `extensions`, and `extension-settings`. Sessions and `AGENTS.md` are intentionally not included by default. Use `/sync include` to add more files or directories interactively (or pass paths directly: `/sync include AGENTS.md prompts/teach.md`).
 - State lives under `<agent-dir>/pi-sync/` (a mirror git repo, `state.json`, and backups).
 
 ## 🗂️ Package layout

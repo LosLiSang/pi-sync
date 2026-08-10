@@ -3,7 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "vitest";
-import { loadConfig, parseConfig, saveConfig } from "../src/config.js";
+import {
+	addIncludeItems,
+	loadConfig,
+	parseConfig,
+	type SyncConfig,
+	saveConfig,
+} from "../src/config.js";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let home: string;
@@ -17,6 +23,20 @@ afterEach(() => {
 	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 	rmSync(home, { recursive: true, force: true });
+});
+
+test("addIncludeItems validates additions and rejects duplicates", () => {
+	const config: SyncConfig = {
+		remote: "git@x:y.git",
+		branch: "pi-sync",
+		include: ["settings.json"],
+		automatic: true,
+	};
+	const updated = addIncludeItems(config, ["AGENTS.md", "prompts/teach.md"]);
+	assert.deepEqual(updated.include, ["settings.json", "AGENTS.md", "prompts/teach.md"]);
+	assert.throws(() => addIncludeItems(config, ["../evil"]), /unsafe include item/u);
+	assert.throws(() => addIncludeItems(config, ["settings.json"]), /duplicate include item/u);
+	assert.throws(() => addIncludeItems(config, ["C:\\abs"]), /must be agent-relative paths/u);
 });
 
 test("loadConfig returns defaults when no config file exists", async () => {

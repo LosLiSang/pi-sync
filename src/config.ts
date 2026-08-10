@@ -97,6 +97,12 @@ export function parseConfig(value: unknown): SyncConfig {
 	};
 }
 
+/** Add include entries, validating them and rejecting duplicates. Returns a new config. */
+export function addIncludeItems(config: SyncConfig, items: string[]): SyncConfig {
+	const include = normalizeInclude([...config.include, ...items]);
+	return { ...config, include };
+}
+
 export async function saveConfig(config: SyncConfig): Promise<void> {
 	await fs.mkdir(agentDir(), { recursive: true });
 	const serialized = `${JSON.stringify(config, null, "\t")}\n`;
