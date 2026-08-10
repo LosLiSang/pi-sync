@@ -1,0 +1,48 @@
+{
+	"name": "@loslisang/pi-sync",
+	"version": "0.1.0",
+	"description": "Personal Pi extension that syncs Pi configuration through Git with background auto-sync and git-style fetch/merge conflict handling.",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"pi",
+		"sync",
+		"git"
+	],
+	"files": [
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"piExtension": {
+		"lifecycle": "experimental"
+	},
+	"scripts": {
+		"check": "biome check . && tsc --noEmit",
+		"format": "biome check --write .",
+		"test": "vitest run",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"diff": "8.0.4"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.7",
+		"@earendil-works/pi-coding-agent": "0.84.1",
+		"@earendil-works/pi-tui": "0.84.1",
+		"@types/node": "^24.0.0",
+		"typescript": "7.0.2",
+		"vitest": "4.1.10"
+	}
+}
