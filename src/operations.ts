@@ -13,7 +13,6 @@ import { diffSummary, formatSnapshotDiff } from "./diff.js";
 import {
 	fetchRemote,
 	isRemoteUpToDate,
-	listHistory,
 	publishSnapshot,
 	readRemoteRevision,
 	readRemoteSnapshot,
@@ -135,25 +134,6 @@ function nextStepHint(info: SyncStatusInfo, mergePending: boolean): string {
 		case "unknown":
 			return "next: /sync fetch to check the remote";
 	}
-}
-
-export async function diff(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {
-	await fetchRemote(config, { signal: ctx.signal });
-	const [local, remote] = await Promise.all([createSnapshot(config), readRemoteSnapshot(config)]);
-	const header = [
-		`remote: ${config.remote}`,
-		`branch: ${config.branch}`,
-		`included: ${config.include.join(", ") || "none"}`,
-	].join("\n");
-	if (!remote) {
-		ctx.ui.notify(
-			`${header}\n\nRemote is empty. Run /sync push to publish local content.`,
-			"warning",
-		);
-		return { pushed: false, pulled: false, merged: false, message: "diff" };
-	}
-	ctx.ui.notify(`${header}\n\n${formatSnapshotDiff(local, remote)}`, "warning");
-	return { pushed: false, pulled: false, merged: false, message: "diff" };
 }
 
 export async function push(
@@ -495,18 +475,6 @@ async function restoreBackup(backupDir: string, config: SyncConfig): Promise<voi
 		await fs.mkdir(path.dirname(target), { recursive: true });
 		await fs.copyFile(absPath, target);
 	}
-}
-
-export async function history(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {
-	await fetchRemote(config, { signal: ctx.signal });
-	const entries = await listHistory({ signal: ctx.signal });
-	if (entries.length === 0) {
-		ctx.ui.notify("No pi-sync history on the remote branch yet.", "info");
-		return { pushed: false, pulled: false, merged: false, message: "history" };
-	}
-	const lines = entries.map((entry) => `${shortId(entry.id)}  ${entry.date}  ${entry.message}`);
-	ctx.ui.notify(lines.join("\n"), "info");
-	return { pushed: false, pulled: false, merged: false, message: "history" };
 }
 
 /** Apply a snapshot by writing its files back into the agent directory. */

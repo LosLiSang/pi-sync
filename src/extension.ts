@@ -14,18 +14,7 @@ interface BackgroundSync {
 	settled: Promise<void>;
 }
 
-const COMMANDS = [
-	"init",
-	"status",
-	"diff",
-	"push",
-	"pull",
-	"fetch",
-	"merge",
-	"history",
-	"config",
-	"help",
-] as const;
+const COMMANDS = ["init", "status", "push", "pull", "fetch", "merge", "config", "help"] as const;
 
 type Subcommand = (typeof COMMANDS)[number];
 
@@ -36,14 +25,12 @@ const USAGE = [
 	"",
 	"commands:",
 	"  init                first-run setup wizard",
-	"  status              show local/remote change summary",
-	"  diff                show content-level local/remote diff",
+	"  config              view and edit the config",
+	"  status              config + sync state + next step (--diff for content)",
 	"  fetch               fetch the remote snapshot without applying",
-	"  merge               three-way merge remote changes into local files",
-	"  push                publish local snapshot (--force overwrites remote changes)",
-	"  pull                overwrite local files with the remote snapshot",
-	"  history             list recent remote snapshot commits",
-	"  config              show the effective config",
+	"  pull                fetch + merge (--force overwrites, --merge resolves)",
+	"  merge               continue an in-progress merge (--abort discards)",
+	"  push                publish local snapshot (--force overwrites remote)",
 	"  help                show this help",
 ].join("\n");
 
@@ -163,9 +150,6 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 				diff: restTokens.some((token) => token === "--diff"),
 			});
 			return;
-		case "diff":
-			await operations.diff(ctx, config);
-			return;
 		case "push":
 			await operations.push(ctx, config, { force });
 			return;
@@ -182,9 +166,6 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 			await operations.merge(ctx, config, {
 				abort: restTokens.some((token) => token === "--abort"),
 			});
-			return;
-		case "history":
-			await operations.history(ctx, config);
 			return;
 		case "config":
 			await runConfigEditor(ctx.ui, config);
