@@ -32,6 +32,10 @@ export interface MergeSessionData {
 	baselineRevision: string;
 	backupDir: string;
 	createdAt: string;
+	/** Files taken from the remote side when the session started. */
+	takeRemote: number;
+	/** Files kept from the local side when the session started. */
+	takeLocal: number;
 	files: MergeFileState[];
 }
 
@@ -80,6 +84,8 @@ function parseMergeSession(value: unknown): MergeSessionData | undefined {
 		typeof record.baselineRevision !== "string" ||
 		typeof record.backupDir !== "string" ||
 		typeof record.createdAt !== "string" ||
+		typeof record.takeRemote !== "number" ||
+		typeof record.takeLocal !== "number" ||
 		!Array.isArray(record.files)
 	) {
 		return undefined;
@@ -94,6 +100,8 @@ function parseMergeSession(value: unknown): MergeSessionData | undefined {
 		baselineRevision: record.baselineRevision,
 		backupDir: record.backupDir,
 		createdAt: record.createdAt,
+		takeRemote: record.takeRemote,
+		takeLocal: record.takeLocal,
 		files,
 	};
 }

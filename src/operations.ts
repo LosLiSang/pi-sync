@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -28,6 +29,7 @@ import {
 import {
 	clearMergeSession,
 	hasMergeSession,
+	loadMergeSession,
 	type MergeFileState,
 	type MergeSessionData,
 	saveMergeSession,
@@ -307,6 +309,8 @@ async function startMergeFlow(
 		baselineRevision: remoteRevision,
 		backupDir: backup,
 		createdAt: new Date().toISOString(),
+		takeRemote: plan.takeRemote.length,
+		takeLocal: plan.takeLocal.length,
 		files: sessionFiles,
 	};
 	await saveMergeSession(session);
@@ -401,58 +405,67 @@ export async function fetch(
 	return { pushed: false, pulled: false, merged: false, message };
 }
 
-export async function merge(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {
-	await fetchRemote(config, { signal: ctx.signal });
-	const [local, remote, remoteRevision, state] = await Promise.all([
-		createSnapshot(config),
-		readRemoteSnapshot(config),
-		readRemoteRevision(config),
-		loadState(),
-	]);
-	if (!remote) {
-		const message = "Remote is empty. Run /sync push first.";
-		ctx.ui.notify(message, "warning");
+export async function merge(
+	ctx: CommandContext,
+	config: SyncConfig,
+	options: { abort?: boolean } = {},
+): Promise<SyncResult> {
+	if (options.abort) {
+		const session = await loadMergeSession();
+		if (!session) {
+			const message = "No merge in progress to abort.";
+			ctx.ui.notify(message, "info");
+			return { pushed: false, pulled: false, merged: false, message };
+		}
+		await restoreBackup(session.backupDir, config);
+		await clearMergeSession();
+		await refreshIndicator(ctx, config);
+		const message = "Merge aborted; local files restored from the pre-merge backup.";
+		ctx.ui.notify(message, "info");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const base = state?.lastRemoteRevision
-		? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
-		: undefined;
-	const plan = planMerge(local, remote, base);
-
-	// Line-level merge for divergent files; JSON files merge field-wise and
-	// only files that still carry conflict markers count as unresolved.
-	const conflictContents = new Map<string, string>();
-	const unresolved: string[] = [];
-	for (const filePath of plan.conflicts) {
-		const merged = await mergeTexts(
-			textFromSnapshot(base ?? emptySnapshot(), filePath),
-			textFromSnapshot(local, filePath),
-			textFromSnapshot(remote, filePath),
-			ctx.signal,
-		);
-		conflictContents.set(filePath, merged.merged);
-		if (merged.conflicted) unresolved.push(filePath);
-	}
-	const merged = mergeSnapshot(local, remote, plan, conflictContents);
-	await backupLocalFiles(merged);
-	await applySnapshot(merged, config);
-	await saveState({
-		version: 1,
-		lastAppliedSnapshot: snapshotSha256(merged),
-		lastRemoteRevision: remoteRevision,
-		lastHashes: Object.fromEntries(merged.files.map((file) => [file.path, file.sha256])),
-	});
-	if (unresolved.length === 0) {
-		const message = `Merged cleanly: ${plan.takeRemote.length} remote, ${plan.takeLocal.length} local, ${plan.conflicts.length} field-merged.`;
+	const session = await loadMergeSession();
+	if (!session) {
+		const message =
+			"No merge in progress. Run /sync pull --merge to merge remote changes into local files.";
 		ctx.ui.notify(message, "info");
-		return { pushed: false, pulled: false, merged: true, message };
+		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const message = [
-		`Merged with ${unresolved.length} conflict(s):`,
-		...unresolved.map((filePath) => `  ${filePath} (markers written; edit then /sync push)`),
-	].join("\n");
-	ctx.ui.notify(message, "warning");
-	return { pushed: false, pulled: false, merged: true, message, conflicts: unresolved };
+	await refreshIndicator(ctx, config);
+	const result = await runBlockResolver(ctx.ui, session);
+	if (!result.completed) {
+		const pending = countPendingBlocks(session);
+		const message = `Merge in progress: ${pending} conflict block(s) left. /sync merge to continue, /sync merge --abort to discard.`;
+		ctx.ui.notify(message, "warning");
+		return {
+			pushed: false,
+			pulled: false,
+			merged: true,
+			message,
+			conflicts: session.files.map((file) => file.path),
+		};
+	}
+	return finishMergeSession(ctx, config, session, session.takeRemote, session.takeLocal);
+}
+
+/** Overwrite the agent dir's include paths with the pre-merge backup files. */
+async function restoreBackup(backupDir: string, config: SyncConfig): Promise<void> {
+	let entries: Dirent[];
+	try {
+		entries = await fs.readdir(backupDir, { recursive: true, withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile()) continue;
+		const absPath = path.join(entry.parentPath ?? backupDir, entry.name);
+		const relative = path.relative(backupDir, absPath).split(path.sep).join("/");
+		const target = resolveSnapshotTarget(relative, config);
+		if (!target) continue;
+		await fs.mkdir(path.dirname(target), { recursive: true });
+		await fs.copyFile(absPath, target);
+	}
 }
 
 export async function history(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {

@@ -176,7 +176,9 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 			await operations.fetch(ctx, config);
 			return;
 		case "merge":
-			await operations.merge(ctx, config);
+			await operations.merge(ctx, config, {
+				abort: restTokens.some((token) => token === "--abort"),
+			});
 			return;
 		case "history":
 			await operations.history(ctx, config);

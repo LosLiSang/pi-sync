@@ -14,6 +14,8 @@ const SESSION: MergeSessionData = {
 	baselineRevision: "abc",
 	backupDir: "backups/x",
 	createdAt: "2026-08-11T00:00:00.000Z",
+	takeRemote: 1,
+	takeLocal: 1,
 	files: [
 		{
 			path: "settings.json",
@@ -61,6 +63,8 @@ test("resolver keeps local, remote and custom blocks and completes", async () =>
 		baselineRevision: "abc",
 		backupDir: "backups/x",
 		createdAt: "2026-08-11T00:00:00.000Z",
+		takeRemote: 1,
+		takeLocal: 1,
 		files: [
 			{
 				path: "settings.json",

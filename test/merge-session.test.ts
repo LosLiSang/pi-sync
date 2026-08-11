@@ -29,6 +29,8 @@ const SESSION: MergeSessionData = {
 	baselineRevision: "abc123",
 	backupDir: path.join("backups", "2026-08-11T00-00-00-000Z"),
 	createdAt: "2026-08-11T00:00:00.000Z",
+	takeRemote: 1,
+	takeLocal: 1,
 	files: [
 		{
 			path: "settings.json",
@@ -89,6 +91,8 @@ test("invalid block data invalidates the whole session", async () => {
 			baselineRevision: "x",
 			backupDir: "b",
 			createdAt: "c",
+			takeRemote: 0,
+			takeLocal: 0,
 			files: [{ path: "f", merged: "m", blocks: [{ local: 1 }] }],
 		}),
 	);

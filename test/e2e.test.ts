@@ -147,43 +147,68 @@ test("push refuses when the remote changed unless --force", async () => {
 	assert.equal(forced.pushed, true);
 });
 
-test("merge conflicts write markers for divergent edits", async () => {
+test("merge resumes an incomplete resolution and --abort restores local files", async () => {
 	writeAgentFile("settings.json", '{"theme":"dark"}\n');
 	const cfg = await config();
 	await operations.push(ctx(), cfg);
 
-	// Remote changes the same file on the same line.
 	await simulateRemotePush('{"theme":"remote-theme"}\n');
-	// Local also changes it.
 	writeAgentFile("settings.json", '{"theme":"local-theme"}\n');
 
-	await operations.fetch(ctx(), cfg);
-	const result = await operations.merge(ctx(), cfg);
-	assert.equal(result.merged, true);
-	assert.ok(result.conflicts?.includes("settings.json"));
+	// Start a resolution and leave it incomplete.
+	const { ctx: partialCtx } = resolverMock(["abort"]);
+	const partial = await operations.pull(partialCtx, cfg, { merge: true });
+	assert.equal(partial.merged, true);
+	assert.equal(await hasMergeSession(), true);
 
-	const merged = require("node:fs").readFileSync(
+	// merge with no session-aware state says nothing to resume if already done;
+	// here it continues the session and completes it.
+	const { ctx: resumeCtx } = resolverMock(["keep local"]);
+	const resumed = await operations.merge(resumeCtx, cfg);
+	assert.equal(resumed.merged, true);
+	assert.equal(resumed.conflicts?.length, 0);
+	assert.equal(await hasMergeSession(), false);
+	const finalContent = require("node:fs").readFileSync(
 		path.join(home, ".pi", "agent", "settings.json"),
 		"utf8",
 	);
-	assert.ok(merged.includes("<<<<<<<"), "conflict markers are written");
-	assert.ok(merged.includes(">>>>>>>"), "conflict markers are written");
+	assert.equal(finalContent, '{"theme":"local-theme"}\n');
+
+	// A new divergent merge, then --abort restores the local file.
+	await simulateRemotePush('{"theme":"remote-theme-2"}\n');
+	writeAgentFile("settings.json", '{"theme":"local-theme-2"}\n');
+	const { ctx: abortStartCtx } = resolverMock(["abort"]);
+	await operations.pull(abortStartCtx, cfg, { merge: true });
+	assert.equal(await hasMergeSession(), true);
+
+	await operations.merge(ctx(), cfg, { abort: true });
+	assert.equal(await hasMergeSession(), false);
+	assert.equal(
+		require("node:fs").readFileSync(path.join(home, ".pi", "agent", "settings.json"), "utf8"),
+		'{"theme":"local-theme-2"}\n',
+	);
 });
 
-test("merge applies cleanly when edits do not overlap", async () => {
+test("pull --merge applies cleanly when edits do not overlap", async () => {
 	writeAgentFile("settings.json", '{"a":"base","b":"base"}\n');
 	const cfg = await config();
 	await operations.push(ctx(), cfg);
 
 	// Remote changes field b only.
 	await simulateRemotePush('{"a":"base","b":"remote"}\n');
-	// Local changes field a only (pretty-printed JSON merges line-wise).
+	// Local changes field a only (pretty-printed JSON merges field-wise).
 	writeAgentFile("settings.json", '{\n  "a": "local",\n  "b": "base"\n}\n');
 
-	await operations.fetch(ctx(), cfg);
-	const result = await operations.merge(ctx(), cfg);
+	const result = await operations.pull(ctx(), cfg, { merge: true });
 	assert.equal(result.merged, true);
-	assert.ok(!result.conflicts || result.conflicts.length === 0);
+	assert.equal(result.conflicts?.length, 0);
+	assert.equal(await hasMergeSession(), false);
+	const finalContent = require("node:fs").readFileSync(
+		path.join(home, ".pi", "agent", "settings.json"),
+		"utf8",
+	);
+	assert.ok(finalContent.includes('"a": "local"'));
+	assert.ok(finalContent.includes('"b": "remote"'));
 });
 
 async function simulateRemotePush(content: string): Promise<void> {
