@@ -17,6 +17,7 @@ const SESSION: MergeSessionData = {
 	files: [
 		{
 			path: "settings.json",
+			merged: "<<<<<<< local\n||||||| base\n=======\n>>>>>>> remote\n",
 			blocks: [
 				{
 					local: "local-a",
@@ -63,6 +64,7 @@ test("resolver keeps local, remote and custom blocks and completes", async () =>
 		files: [
 			{
 				path: "settings.json",
+				merged: "<<<<<<< local\n||||||| base\n=======\n>>>>>>> remote\n",
 				blocks: [
 					{
 						local: "local-a",
@@ -131,6 +133,7 @@ test("resolver with nothing pending completes immediately", async () => {
 		files: [
 			{
 				path: "a.md",
+				merged: "<<<<<<< local\n||||||| base\n=======\n>>>>>>> remote\n",
 				blocks: [
 					{ local: "l", base: "b", remote: "r", resolution: "l", choice: "local" },
 					{ local: "l2", base: "b2", remote: "r2", resolution: "custom", choice: "custom" },

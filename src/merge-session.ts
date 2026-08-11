@@ -18,6 +18,8 @@ export interface ConflictBlock {
 
 export interface MergeFileState {
 	path: string;
+	/** The full merged text with diff3 markers (resume needs no disk state). */
+	merged: string;
 	blocks: ConflictBlock[];
 }
 
@@ -99,14 +101,20 @@ function parseMergeSession(value: unknown): MergeSessionData | undefined {
 function parseMergeFile(value: unknown): MergeFileState | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const record = value as Record<string, unknown>;
-	if (typeof record.path !== "string" || !Array.isArray(record.blocks)) return undefined;
+	if (
+		typeof record.path !== "string" ||
+		typeof record.merged !== "string" ||
+		!Array.isArray(record.blocks)
+	) {
+		return undefined;
+	}
 	const blocks: ConflictBlock[] = [];
 	for (const block of record.blocks) {
 		const parsed = parseBlock(block);
 		if (!parsed) return undefined;
 		blocks.push(parsed);
 	}
-	return { path: record.path, blocks };
+	return { path: record.path, merged: record.merged, blocks };
 }
 
 function parseBlock(value: unknown): ConflictBlock | undefined {

@@ -32,6 +32,7 @@ const SESSION: MergeSessionData = {
 	files: [
 		{
 			path: "settings.json",
+			merged: "<<<<<<< local\na\n||||||| base\nb\n=======\nc\n>>>>>>> remote\n",
 			blocks: [
 				{ local: "a", base: "b", remote: "c", resolution: undefined, choice: undefined },
 				{ local: "x", base: "y", remote: "z", resolution: "picked", choice: "custom" },
@@ -39,6 +40,7 @@ const SESSION: MergeSessionData = {
 		},
 		{
 			path: "AGENTS.md",
+			merged: "<<<<<<< local\nl\n||||||| base\nb\n=======\nr\n>>>>>>> remote\n",
 			blocks: [{ local: "l", base: "b", remote: "r", resolution: "l", choice: "local" }],
 		},
 	],
@@ -87,7 +89,7 @@ test("invalid block data invalidates the whole session", async () => {
 			baselineRevision: "x",
 			backupDir: "b",
 			createdAt: "c",
-			files: [{ path: "f", blocks: [{ local: 1 }] }],
+			files: [{ path: "f", merged: "m", blocks: [{ local: 1 }] }],
 		}),
 	);
 	assert.equal(await loadMergeSession(), undefined);

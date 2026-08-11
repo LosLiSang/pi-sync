@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, test } from "vitest";
 import { loadConfig, type SyncConfig, saveConfig } from "../src/config.js";
 import { readRemoteSnapshot, runGit } from "../src/git.js";
+import { hasMergeSession } from "../src/merge-session.js";
 import * as operations from "../src/operations.js";
 import { createSnapshot } from "../src/snapshot.js";
 import { loadState } from "../src/state.js";
@@ -86,18 +87,45 @@ test("fetch then diff shows content-level changes", async () => {
 	);
 });
 
-test("pull overwrites local files with the remote snapshot", async () => {
+test("pull fast-forwards a fresh machine and --force overwrites diverged local files", async () => {
 	// Machine A pushes.
 	writeAgentFile("settings.json", '{"theme":"dark"}\n');
 	const cfgA = await config({ remote: remoteDir });
 	await operations.push(ctx(), cfgA);
 
-	// Machine B (fresh home) pulls and adopts the remote content.
-	writeAgentFile("settings.json", '{"theme":"local-stale"}\n');
-	await operations.pull(ctx(), cfgA);
+	// Fresh machine: no state, no local file -> pull adopts the remote content.
+	rmSync(path.join(home, ".pi", "agent", "pi-sync", "state.json"), { force: true });
+	rmSync(path.join(home, ".pi", "agent", "settings.json"), { force: true });
+	const fresh = await operations.pull(ctx(), cfgA);
+	assert.equal(fresh.pulled, true);
 	assert.equal(
 		require("node:fs").readFileSync(path.join(home, ".pi", "agent", "settings.json"), "utf8"),
 		'{"theme":"dark"}\n',
+	);
+
+	// Machine B edits locally; remote is unchanged -> pull is a no-op.
+	writeAgentFile("settings.json", '{"theme":"local-stale"}\n');
+	const noop = await operations.pull(ctx(), cfgA);
+	assert.equal(noop.pulled, false);
+	assert.match(noop.message, /local is ahead/u);
+
+	// Remote changes too -> diverged -> plain pull writes nothing.
+	await simulateRemotePush('{"theme":"remote-new"}\n');
+	const diverged = await operations.pull(ctx(), cfgA);
+	assert.equal(diverged.pulled, false);
+	assert.equal(diverged.merged, false);
+	assert.match(diverged.message, /diverged/u);
+	assert.equal(
+		require("node:fs").readFileSync(path.join(home, ".pi", "agent", "settings.json"), "utf8"),
+		'{"theme":"local-stale"}\n',
+	);
+
+	// --force overwrites local with the remote snapshot.
+	const forced = await operations.pull(ctx(), cfgA, { force: true });
+	assert.equal(forced.pulled, true);
+	assert.equal(
+		require("node:fs").readFileSync(path.join(home, ".pi", "agent", "settings.json"), "utf8"),
+		'{"theme":"remote-new"}\n',
 	);
 });
 
@@ -186,7 +214,8 @@ test("arbitrary agent-relative include entries push and pull", async () => {
 	const cfg = await config({ include: ["AGENTS.md", "prompts/teach.md"] });
 	await operations.push(ctx(), cfg);
 
-	// Fresh machine pulls both files back.
+	// Fresh machine pulls both files back (no state, no local copies).
+	rmSync(path.join(home, ".pi", "agent", "pi-sync", "state.json"), { force: true });
 	rmSync(path.join(home, ".pi", "agent", "AGENTS.md"), { force: true });
 	rmSync(path.join(home, ".pi", "agent", "prompts"), { recursive: true, force: true });
 	await operations.pull(ctx(), cfg);
@@ -232,4 +261,68 @@ test("fetch refreshes the indicator when the remote has new changes", async () =
 		statuses.some((entry) => entry.key === "sync" && entry.text === "sync: 1 behind — pull"),
 		`expected behind indicator, got ${JSON.stringify(statuses)}`,
 	);
+});
+
+function resolverMock(selects: Array<string | undefined>, inputs: Array<string | undefined> = []) {
+	let selectIndex = 0;
+	let inputIndex = 0;
+	const notifications: Array<{ message: string; level?: string }> = [];
+	const ctx = createMockContext({
+		hasUI: true,
+		mode: "rpc",
+		ui: {
+			notify: (message: string, level = "info") => notifications.push({ message, level }),
+			setStatus: () => undefined,
+			confirm: async () => true,
+			input: async () => inputs[inputIndex++],
+			select: async () => selects[selectIndex++],
+		},
+	}).ctx;
+	return { ctx, notifications };
+}
+
+test("pull --merge resolves divergent edits through the structured resolver", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	await simulateRemotePush('{"theme":"remote-theme"}\n');
+	writeAgentFile("settings.json", '{"theme":"local-theme"}\n');
+
+	const { ctx: mergeCtx } = resolverMock(["keep remote"]);
+	const result = await operations.pull(mergeCtx, cfg, { merge: true });
+	assert.equal(result.merged, true);
+	assert.equal(result.conflicts?.length, 0);
+
+	const finalContent = require("node:fs").readFileSync(
+		path.join(home, ".pi", "agent", "settings.json"),
+		"utf8",
+	);
+	assert.equal(finalContent, '{"theme":"remote-theme"}\n');
+	assert.equal(await hasMergeSession(), false);
+});
+
+test("pull --merge persists an incomplete resolution and push refuses", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	await simulateRemotePush('{"theme":"remote-theme"}\n');
+	writeAgentFile("settings.json", '{"theme":"local-theme"}\n');
+
+	const { ctx: mergeCtx } = resolverMock(["abort"]);
+	const result = await operations.pull(mergeCtx, cfg, { merge: true });
+	assert.equal(result.merged, true);
+	assert.ok(result.conflicts?.includes("settings.json"));
+	assert.equal(await hasMergeSession(), true);
+
+	// The conflict markers are on disk and push is blocked.
+	const onDisk = require("node:fs").readFileSync(
+		path.join(home, ".pi", "agent", "settings.json"),
+		"utf8",
+	);
+	assert.ok(onDisk.includes("<<<<<<<"));
+	const pushed = await operations.push(ctx(), cfg);
+	assert.equal(pushed.pushed, false);
+	assert.match(pushed.message, /merge is in progress/u);
 });

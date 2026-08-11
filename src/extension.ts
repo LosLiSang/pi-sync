@@ -167,7 +167,10 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 			await operations.push(ctx, config, { force });
 			return;
 		case "pull":
-			await operations.pull(ctx, config);
+			await operations.pull(ctx, config, {
+				force,
+				merge: restTokens.some((token) => token === "--merge"),
+			});
 			return;
 		case "fetch":
 			await operations.fetch(ctx, config);
