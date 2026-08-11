@@ -159,7 +159,9 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 			await runSetupWizard(ctx.ui);
 			return;
 		case "status":
-			await operations.status(ctx, config);
+			await operations.status(ctx, config, {
+				diff: restTokens.some((token) => token === "--diff"),
+			});
 			return;
 		case "diff":
 			await operations.diff(ctx, config);

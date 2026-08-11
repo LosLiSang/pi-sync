@@ -38,7 +38,7 @@ import { agentDir, syncRootPath } from "./paths.js";
 import { runBlockResolver } from "./resolve.js";
 import { createSnapshot, type Snapshot, snapshotSha256 } from "./snapshot.js";
 import { loadState, saveState } from "./state.js";
-import { deriveSyncStatus, syncIndicatorText } from "./status.js";
+import { deriveSyncStatus, type SyncStatusInfo, syncIndicatorText } from "./status.js";
 
 export interface SyncResult {
 	pushed: boolean;
@@ -78,34 +78,63 @@ export async function refreshIndicator(ctx: OperationContext, config: SyncConfig
 	}
 }
 
-export async function status(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {
-	await fetchRemote(config, { signal: ctx.signal });
-	const [local, remote, remoteRevision, state] = await Promise.all([
+import { formatConfig } from "./config-ui.js";
+
+export async function status(
+	ctx: CommandContext,
+	config: SyncConfig,
+	options: { diff?: boolean } = {},
+): Promise<SyncResult> {
+	// status never fetches; it reflects the last known mirror state.
+	const [local, remote, state] = await Promise.all([
 		createSnapshot(config),
 		readRemoteSnapshot(config),
-		readRemoteRevision(config),
 		loadState(),
 	]);
-	const localSummary = diffSummary(local, remote ?? emptySnapshot());
+	const base = state?.lastRemoteRevision
+		? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
+		: undefined;
+	const info = deriveSyncStatus(local, remote, base);
+	const mergeSession = await loadMergeSession();
+	await refreshIndicator(ctx, config);
 	const lines = [
-		`remote: ${config.remote}`,
-		`branch: ${config.branch}`,
-		`automatic: ${config.automatic ? "enabled" : "disabled"}`,
-		`included: ${config.include.join(", ") || "none"}`,
+		formatConfig(config),
+		`state: ${syncIndicatorText(info)}`,
+		`last applied: ${state ? shortId(state.lastAppliedSnapshot) : "never"}`,
 	];
-	if (!remote) {
-		lines.push("remote: empty — nothing synced yet");
-	} else {
+	if (mergeSession) {
 		lines.push(
-			`remote: ${remote.files.length} files (${shortId(remoteRevision ?? "")})`,
-			`local changes vs remote: ${describeChanges(localSummary)}`,
+			`merge in progress: ${countPendingBlocks(mergeSession)} conflict block(s) unresolved — /sync merge to continue, /sync merge --abort to discard`,
 		);
 	}
-	if (state) {
-		lines.push(`last applied: ${shortId(state.lastAppliedSnapshot)}`);
+	lines.push(nextStepHint(info, mergeSession !== undefined));
+	if (options.diff && remote) {
+		lines.push("", formatSnapshotDiff(local, remote));
 	}
-	ctx.ui.notify(lines.join("\n"), localSummary.identical ? "info" : "warning");
+	const level = info.label === "up-to-date" && !mergeSession ? "info" : "warning";
+	ctx.ui.notify(lines.join("\n"), level);
 	return { pushed: false, pulled: false, merged: false, message: "status" };
+}
+
+/** The closed-loop hint: what to do next given the current state. */
+function nextStepHint(info: SyncStatusInfo, mergePending: boolean): string {
+	if (mergePending) return "next: /sync merge (resolve) or /sync merge --abort (discard)";
+	switch (info.label) {
+		case "unconfigured":
+			return "next: /sync init";
+		case "unpublished":
+			return "next: /sync push";
+		case "up-to-date":
+			return "next: nothing — all synced";
+		case "ahead":
+			return "next: /sync push to publish local changes";
+		case "behind":
+			return "next: /sync pull to fetch and apply remote changes";
+		case "conflict":
+			return "next: /sync pull --merge to resolve, or /sync pull --force to overwrite local";
+		case "unknown":
+			return "next: /sync fetch to check the remote";
+	}
 }
 
 export async function diff(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {

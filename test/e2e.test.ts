@@ -351,3 +351,51 @@ test("pull --merge persists an incomplete resolution and push refuses", async ()
 	assert.equal(pushed.pushed, false);
 	assert.match(pushed.message, /merge is in progress/u);
 });
+
+test("status never fetches and shows state plus the next-step hint", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	const { ctx: s1, notifications: n1 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s1, cfg);
+	const upToDate = n1.at(-1)?.message ?? "";
+	assert.ok(upToDate.includes("state: sync: up-to-date"));
+	assert.ok(upToDate.includes("next: nothing — all synced"));
+
+	// Remote gains a change; status without fetch still shows the stale state.
+	await simulateRemotePush('{"theme":"remote-change"}\n');
+	const { ctx: s2, notifications: n2 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s2, cfg);
+	const stale = n2.at(-1)?.message ?? "";
+	assert.ok(stale.includes("sync: up-to-date"), "status must not fetch");
+
+	// After a manual fetch, status reflects the new state and hints at pull.
+	await operations.fetch(ctx(), cfg);
+	const { ctx: s3, notifications: n3 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s3, cfg);
+	const behind = n3.at(-1)?.message ?? "";
+	assert.ok(behind.includes("state: sync: 1 behind — pull"));
+	assert.ok(behind.includes("next: /sync pull"));
+});
+
+test("status --diff includes the content diff and status shows a merge in progress", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	await simulateRemotePush('{"theme":"remote-theme"}\n');
+	writeAgentFile("settings.json", '{"theme":"local-theme"}\n');
+
+	// Diverged: start a resolution and leave it incomplete.
+	const { ctx: partialCtx } = resolverMock(["abort"]);
+	await operations.pull(partialCtx, cfg, { merge: true });
+	assert.equal(await hasMergeSession(), true);
+
+	const { ctx: s, notifications } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s, cfg, { diff: true });
+	const message = notifications.at(-1)?.message ?? "";
+	assert.ok(message.includes("merge in progress: 1 conflict block(s) unresolved"));
+	assert.ok(message.includes("next: /sync merge"));
+	assert.ok(message.includes('"theme"'), "--diff shows content hunks");
+});
