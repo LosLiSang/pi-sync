@@ -3,7 +3,7 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { loadConfig } from "./config.js";
+import { loadConfig, type SyncConfig } from "./config.js";
 import { runConfigEditor } from "./config-ui.js";
 import * as operations from "./operations.js";
 import { syncBusyText } from "./status.js";
@@ -38,6 +38,7 @@ const USAGE = [
 export default function sync(pi: ExtensionAPI): void {
 	let sessionAbort = new AbortController();
 	let backgroundSync: BackgroundSync | undefined;
+	let backgroundPush: BackgroundSync | undefined;
 
 	const startBackgroundSync = (ctx: ExtensionContext, signal: AbortSignal) => {
 		// While the automatic fetch is in flight the indicator shows the busy
@@ -55,15 +56,42 @@ export default function sync(pi: ExtensionAPI): void {
 		backgroundSync = { settled };
 	};
 
-	const drainBackgroundSync = async (signal?: AbortSignal): Promise<void> => {
-		const current = backgroundSync;
+	// Publish in the background so the TUI stays interactive while git talks
+	// to the remote (fetch + push can take many seconds). The indicator shows
+	// "pushing…"; operations.push notifies the outcome when it settles.
+	const startBackgroundPush = (
+		ctx: ExtensionCommandContext,
+		config: SyncConfig,
+		force: boolean,
+		signal: AbortSignal,
+	) => {
+		ctx.ui.setStatus(STATUS_KEY, syncBusyText("push"));
+		const settled = (async () => {
+			try {
+				await operations.push(ctx, config, { force });
+			} catch (error) {
+				if (signal.aborted) return;
+				ctx.ui.setStatus(STATUS_KEY, undefined);
+				ctx.ui.notify(`pi-sync push failed: ${errorMessage(error)}`, "error");
+			}
+		})();
+		backgroundPush = { settled };
+	};
+
+	const drainBackgroundTasks = async (signal?: AbortSignal): Promise<void> => {
+		const tasks = [backgroundSync, backgroundPush];
 		backgroundSync = undefined;
-		if (!current) return;
-		try {
-			await (signal ? Promise.race([current.settled, waitForAbort(signal)]) : current.settled);
-		} catch {
-			// The shutdown deadline or a replacement aborted while draining; the
-			// background sync observes its own session signal and settles on its own.
+		backgroundPush = undefined;
+		for (const current of tasks) {
+			if (!current) continue;
+			try {
+				await (signal
+					? Promise.race([current.settled, waitForAbort(signal)])
+					: current.settled);
+			} catch {
+				// The shutdown deadline or a replacement aborted while draining; the
+				// background task observes its own session signal and settles on its own.
+			}
 		}
 	};
 
@@ -84,7 +112,18 @@ export default function sync(pi: ExtensionAPI): void {
 				);
 			}
 			try {
-				await handleCommand(args, ctx);
+				await handleCommand(args, ctx, async (pushCtx, config, force) => {
+					if (backgroundPush) {
+						pushCtx.ui.notify("A push is already in progress.", "warning");
+						return;
+					}
+					// Wait for the session-start automatic fetch so the two
+					// background tasks never contend on the mirror repo, then run
+					// the publish without blocking the TUI.
+					await drainBackgroundTasks();
+					if (sessionAbort.signal.aborted) return;
+					startBackgroundPush(pushCtx, config, force, sessionAbort.signal);
+				});
 			} catch (error) {
 				if (sessionAbort.signal.aborted) return;
 				ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -98,7 +137,7 @@ export default function sync(pi: ExtensionAPI): void {
 		sessionAbort = new AbortController();
 		const signal = sessionAbort.signal;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
-		await drainBackgroundSync();
+		await drainBackgroundTasks();
 		try {
 			const config = await loadConfig();
 			if (signal.aborted) return;
@@ -126,7 +165,15 @@ async function runAutomaticSync(ctx: ExtensionContext, signal: AbortSignal): Pro
 	await operations.fetch(ctx, config, { quiet: true });
 }
 
-async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Promise<void> {
+async function handleCommand(
+	rawArgs: string,
+	ctx: ExtensionCommandContext,
+	runPush: (
+		ctx: ExtensionCommandContext,
+		config: SyncConfig,
+		force: boolean,
+	) => Promise<void>,
+): Promise<void> {
 	const [first = "", ...restTokens] = rawArgs.trim().split(/\s+/u);
 	const subcommand = normalizeSubcommand(first);
 	if (subcommand === undefined || subcommand === "help") {
@@ -159,7 +206,7 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 			});
 			return;
 		case "push":
-			await operations.push(ctx, config, { force });
+			await runPush(ctx, config, force);
 			return;
 		case "pull":
 			await operations.pull(ctx, config, {

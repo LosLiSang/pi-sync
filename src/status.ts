@@ -49,9 +49,9 @@ export function deriveSyncStatus(
 	return { label: "up-to-date", ahead: 0, behind: 0, conflicts: 0 };
 }
 
-/** Short status-bar text while a background sync (automatic fetch) is in flight. */
-export function syncBusyText(): string {
-	return "sync: fetching…";
+/** Status-bar text while a background/foreground sync action is in flight. */
+export function syncBusyText(action: "fetch" | "push" = "fetch"): string {
+	return action === "push" ? "sync: pushing…" : "sync: fetching…";
 }
 
 /** Short status-bar text for the sync indicator. */

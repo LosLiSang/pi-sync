@@ -75,4 +75,6 @@ test("no remote snapshot is unpublished", () => {
 
 test("syncBusyText shows the in-flight background sync state", () => {
 	assert.equal(syncBusyText(), "sync: fetching…");
+	assert.equal(syncBusyText("fetch"), "sync: fetching…");
+	assert.equal(syncBusyText("push"), "sync: pushing…");
 });

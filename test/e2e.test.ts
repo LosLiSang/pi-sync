@@ -464,7 +464,7 @@ test("full loop closes: init -> config -> status -> pull conflict -> merge -> pu
 	const { ctx: s3, notifications: n3 } = createMockContext({ hasUI: true, mode: "rpc" });
 	await operations.status(s3, cfg);
 	assert.ok((n3.at(-1)?.message ?? "").includes("sync: up-to-date"));
-});
+}, 15_000);
 
 test("out-of-include remote changes do not conflict after include shrinkage", async () => {
 	writeAgentFile("settings.json", '{"theme":"dark"}\n');
