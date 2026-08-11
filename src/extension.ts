@@ -130,8 +130,15 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 		return;
 	}
 
+	// init re-creates the config from scratch: it must work even when the
+	// existing pi-sync.json is broken or in an old format.
+	if (subcommand === "init") {
+		await runSetupWizard(ctx.ui);
+		return;
+	}
+
 	const config = await loadConfig();
-	if (subcommand !== "init" && config.remote.length === 0) {
+	if (config.remote.length === 0) {
 		ctx.ui.notify(
 			"pi-sync is not configured. Run /sync init to set up the git remote, or edit pi-sync.json.",
 			"warning",
@@ -142,9 +149,6 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 	const force = restTokens.some((token) => token === "--force");
 
 	switch (subcommand) {
-		case "init":
-			await runSetupWizard(ctx.ui);
-			return;
 		case "status":
 			await operations.status(ctx, config, {
 				diff: restTokens.some((token) => token === "--diff"),

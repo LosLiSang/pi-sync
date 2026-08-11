@@ -466,6 +466,26 @@ test("full loop closes: init -> config -> status -> pull conflict -> merge -> pu
 	assert.ok((n3.at(-1)?.message ?? "").includes("sync: up-to-date"));
 });
 
+test("init re-creates the config when the existing pi-sync.json is broken", async () => {
+	// A machine carrying an old-format config (no remote field) must still be
+	// able to run the init wizard and get a fresh valid config.
+	const configFile = path.join(home, ".pi", "agent", "pi-sync.json");
+	mkdirSync(path.dirname(configFile), { recursive: true });
+	writeFileSync(configFile, '{"storageConnections":[],"syncSetups":[]}\n');
+
+	const { ui: wizardUi } = wizardMock(
+		[remoteDir, "main"],
+		[true, false, false, false, false, false, false, false, true],
+	);
+	const initConfig = await runSetupWizard(wizardUi);
+	assert.ok(initConfig);
+	const cfg = await loadConfig();
+	assert.equal(cfg.remote, remoteDir);
+	assert.equal(cfg.branch, "main");
+	assert.deepEqual(cfg.include, ["settings.json"]);
+	assert.equal(cfg.automatic, true);
+});
+
 function cfgCtxUi(firstSelect: string) {
 	let selectIndex = 0;
 	return {

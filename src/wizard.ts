@@ -18,7 +18,14 @@ const INCLUDE_CHOICES = [
  * automatic-sync switch, then persist a single config file.
  */
 export async function runSetupWizard(ui: ExtensionUIContext): Promise<SyncConfig | undefined> {
-	const existing = await loadConfig();
+	let existing: SyncConfig;
+	try {
+		existing = await loadConfig();
+	} catch {
+		// A broken or old-format config must not block re-initialization;
+		// fall back to a fresh setup.
+		existing = { ...DEFAULT_CONFIG };
+	}
 	const hasConfig = existing.remote.length > 0;
 
 	const remote = await ui.input("Git remote URL", "git@github.com:you/pi-sync.git or https://…");
