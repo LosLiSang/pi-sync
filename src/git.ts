@@ -149,6 +149,7 @@ export async function readRemoteSnapshot(
 	options: GitRunOptions = {},
 ): Promise<Snapshot | undefined> {
 	const repo = mirrorRepoDir();
+	if (!(await pathExists(repo))) return undefined;
 	const ref = `refs/remotes/origin/${config.branch}`;
 	try {
 		const result = await runGit(["show", `${ref}:pi-sync/snapshot.json`], {
@@ -186,6 +187,7 @@ export async function readRemoteRevision(
 	config: SyncConfig,
 	options: GitRunOptions = {},
 ): Promise<string | undefined> {
+	if (!(await pathExists(mirrorRepoDir()))) return undefined;
 	const ref = `refs/remotes/origin/${config.branch}`;
 	try {
 		const result = await runGit(["rev-parse", ref], {
@@ -208,6 +210,17 @@ export async function publishSnapshot(
 	force = false,
 ): Promise<string> {
 	const repo = mirrorRepoDir();
+	// The mirror is disposable (it only tracks pi-sync/snapshot.json). Advance
+	// it to the fetched remote tip so the publish push fast-forwards; the
+	// caller has already decided it is safe to publish. Missing ref = first push.
+	try {
+		await runGit(["reset", "--hard", `refs/remotes/origin/${config.branch}`], {
+			cwd: repo,
+			signal: options.signal,
+		});
+	} catch {
+		// Remote branch does not exist yet; publish from the empty HEAD.
+	}
 	await fs.mkdir(path.dirname(snapshotFilePath()), { recursive: true });
 	await fs.writeFile(snapshotFilePath(), `${JSON.stringify(snapshot, null, "\t")}\n`, {
 		mode: 0o600,

@@ -5,11 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "vitest";
 import { loadConfig, type SyncConfig, saveConfig } from "../src/config.js";
+import { runConfigEditor } from "../src/config-ui.js";
 import { readRemoteSnapshot, runGit } from "../src/git.js";
 import { hasMergeSession } from "../src/merge-session.js";
 import * as operations from "../src/operations.js";
 import { createSnapshot } from "../src/snapshot.js";
 import { loadState } from "../src/state.js";
+import { runSetupWizard } from "../src/wizard.js";
 import { createMockContext } from "./support.js";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -211,9 +213,9 @@ test("pull --merge applies cleanly when edits do not overlap", async () => {
 	assert.ok(finalContent.includes('"b": "remote"'));
 });
 
-async function simulateRemotePush(content: string): Promise<void> {
+async function simulateRemotePush(content: string, branch = "pi-sync"): Promise<void> {
 	const cloneDir = path.join(home, "simulate");
-	await runGit(["clone", "--quiet", "--branch", "pi-sync", remoteDir, cloneDir], { cwd: home });
+	await runGit(["clone", "--quiet", "--branch", branch, remoteDir, cloneDir], { cwd: home });
 	mkdirSync(path.join(cloneDir, "pi-sync"), { recursive: true });
 	const snapshot = {
 		version: 1,
@@ -229,7 +231,7 @@ async function simulateRemotePush(content: string): Promise<void> {
 	writeFileSync(path.join(cloneDir, "pi-sync", "snapshot.json"), `${JSON.stringify(snapshot)}\n`);
 	await runGit(["add", "--", "pi-sync/snapshot.json"], { cwd: cloneDir });
 	await runGit(["commit", "--quiet", "-m", "simulated remote change"], { cwd: cloneDir });
-	await runGit(["push", "--quiet", "origin", "HEAD:pi-sync"], { cwd: cloneDir });
+	await runGit(["push", "--quiet", "origin", `HEAD:${branch}`], { cwd: cloneDir });
 	await rmSync(cloneDir, { recursive: true, force: true });
 }
 
@@ -399,3 +401,78 @@ test("status --diff includes the content diff and status shows a merge in progre
 	assert.ok(message.includes("next: /sync merge"));
 	assert.ok(message.includes('"theme"'), "--diff shows content hunks");
 });
+
+function wizardMock(inputs: Array<string | undefined>, confirms: Array<boolean>) {
+	let inputIndex = 0;
+	let confirmIndex = 0;
+	const ui = {
+		notify: () => undefined,
+		setStatus: () => undefined,
+		confirm: async () => confirms[confirmIndex++],
+		input: async () => inputs[inputIndex++],
+		select: async () => undefined,
+	};
+	return { ui: ui as never };
+}
+
+test("full loop closes: init -> config -> status -> pull conflict -> merge -> push -> status", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+
+	// init: wizard configures remote/branch/include/automatic.
+	const { ui: wizardUi } = wizardMock(
+		[remoteDir, "main"],
+		[true, false, false, false, false, false, false, false, true],
+	);
+	const initConfig = await runSetupWizard(wizardUi);
+	assert.ok(initConfig);
+	const cfg = await loadConfig();
+	assert.equal(cfg.remote, remoteDir);
+	assert.equal(cfg.branch, "main");
+	assert.deepEqual(cfg.include, ["settings.json"]);
+	assert.equal(cfg.automatic, true);
+
+	// config: open the editor and finish without changes; status shows unpublished.
+	await runConfigEditor(cfgCtxUi("done") as never, cfg);
+	const { ctx: s0, notifications: n0 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s0, cfg);
+	assert.ok((n0.at(-1)?.message ?? "").includes("sync: unpublished — push"));
+
+	// push: first publish, then status closes the loop.
+	await operations.push(ctx(), cfg);
+	const { ctx: s1, notifications: n1 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s1, cfg);
+	assert.ok((n1.at(-1)?.message ?? "").includes("sync: up-to-date"));
+	assert.ok((n1.at(-1)?.message ?? "").includes("next: nothing — all synced"));
+
+	// Divergence: remote changes, local changes too.
+	await simulateRemotePush('{"theme":"remote-theme"}\n', "main");
+	writeAgentFile("settings.json", '{"theme":"local-theme"}\n');
+	await operations.fetch(ctx(), cfg);
+	const { ctx: s2, notifications: n2 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s2, cfg);
+	assert.ok((n2.at(-1)?.message ?? "").includes("sync: conflict"));
+	assert.ok((n2.at(-1)?.message ?? "").includes("next: /sync pull --merge"));
+
+	// pull --merge resolves the block, then push publishes.
+	const { ctx: mergeCtx } = resolverMock(["keep local"]);
+	const pulled = await operations.pull(mergeCtx, cfg, { merge: true });
+	assert.equal(pulled.merged, true);
+	assert.equal(await hasMergeSession(), false);
+	await operations.push(ctx(), cfg);
+
+	// The loop is closed: up to date again.
+	const { ctx: s3, notifications: n3 } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.status(s3, cfg);
+	assert.ok((n3.at(-1)?.message ?? "").includes("sync: up-to-date"));
+});
+
+function cfgCtxUi(firstSelect: string) {
+	let selectIndex = 0;
+	return {
+		notify: () => undefined,
+		setStatus: () => undefined,
+		confirm: async () => true,
+		input: async () => undefined,
+		select: async () => (selectIndex++ === 0 ? firstSelect : undefined),
+	};
+}
