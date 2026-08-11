@@ -4,6 +4,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.js";
+import { runConfigEditor } from "./config-ui.js";
 import * as operations from "./operations.js";
 import { runSetupWizard } from "./wizard.js";
 
@@ -184,15 +185,7 @@ async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Pro
 			await operations.history(ctx, config);
 			return;
 		case "config":
-			ctx.ui.notify(
-				[
-					`remote: ${config.remote}`,
-					`branch: ${config.branch}`,
-					`automatic: ${config.automatic ? "enabled" : "disabled"}`,
-					`included: ${config.include.join(", ") || "none"}`,
-				].join("\n"),
-				"info",
-			);
+			await runConfigEditor(ctx.ui, config);
 			return;
 	}
 }
