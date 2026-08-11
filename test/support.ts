@@ -1,5 +1,6 @@
 export function createMockContext(overrides: Record<string, unknown> = {}) {
 	const notifications: Array<{ message: string; level?: string }> = [];
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
 	const ctx = {
 		cwd: overrides.cwd ?? process.cwd(),
 		mode: overrides.mode ?? "rpc",
@@ -8,7 +9,7 @@ export function createMockContext(overrides: Record<string, unknown> = {}) {
 			notify(message: string, level = "info") {
 				notifications.push({ message, level });
 			},
-			setStatus: () => undefined,
+			setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }),
 			confirm: async () => true,
 			input: async () => undefined,
 			select: async () => undefined,
@@ -35,5 +36,6 @@ export function createMockContext(overrides: Record<string, unknown> = {}) {
 	return {
 		ctx: ctx as never,
 		notifications,
+		statuses,
 	};
 }

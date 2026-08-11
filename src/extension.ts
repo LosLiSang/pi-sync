@@ -3,12 +3,8 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { loadConfig, type SyncConfig } from "./config.js";
-import { readRemoteSnapshot, readSnapshotAt } from "./git.js";
-import { planMerge } from "./merge.js";
+import { loadConfig } from "./config.js";
 import * as operations from "./operations.js";
-import { createSnapshot } from "./snapshot.js";
-import { loadState } from "./state.js";
 import { runSetupWizard } from "./wizard.js";
 
 const STATUS_KEY = "sync";
@@ -114,7 +110,7 @@ export default function sync(pi: ExtensionAPI): void {
 		try {
 			const config = await loadConfig();
 			if (signal.aborted) return;
-			if (config.remote.length === 0) return; // not configured yet
+			if (config.remote.length === 0 || !config.automatic) return; // not configured or manual-only
 			startBackgroundSync(ctx, signal);
 		} catch (error) {
 			if (signal.aborted) return;
@@ -122,25 +118,10 @@ export default function sync(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("session_shutdown", async (event, ctx) => {
+	pi.on("session_shutdown", async () => {
+		// automatic only observes; aborting the in-flight fetch is enough. No
+		// shutdown push — nothing writes local files without an explicit command.
 		sessionAbort.abort(new DOMException("Session shut down", "AbortError"));
-		const controller = new AbortController();
-		const signal = combineSignals(controller.signal, AbortSignal.timeout(30_000));
-		const reason =
-			typeof event === "object" && event ? (event as { reason?: string }).reason : undefined;
-		try {
-			if (reason !== "reload") {
-				await drainBackgroundSync(signal);
-				if (signal.aborted) return;
-				await runShutdownPush(ctx, signal);
-			}
-		} catch (error) {
-			if (!signal.aborted) {
-				ctx.ui.notify(`pi-sync session push skipped: ${errorMessage(error)}`, "warning");
-			}
-		} finally {
-			controller.abort(new DOMException("Session shutdown finished", "AbortError"));
-		}
 	});
 }
 
@@ -148,58 +129,9 @@ async function runAutomaticSync(ctx: ExtensionContext, signal: AbortSignal): Pro
 	const config = await loadConfig();
 	throwIfAborted(signal);
 	if (config.remote.length === 0 || !config.automatic) return;
-	ctx.ui.setStatus(STATUS_KEY, "syncing");
-	try {
-		await operations.fetch(ctx, config);
-		throwIfAborted(signal);
-		const direction = await decideAutoDirection(config, signal);
-		throwIfAborted(signal);
-		switch (direction) {
-			case "push":
-				await operations.push(ctx, config);
-				return;
-			case "pull":
-				await operations.pull(ctx, config);
-				return;
-			case "merge":
-				await operations.merge(ctx, config);
-				return;
-			case "none":
-				return;
-		}
-	} finally {
-		if (!signal.aborted) ctx.ui.setStatus(STATUS_KEY, undefined);
-	}
-}
-
-async function decideAutoDirection(
-	config: SyncConfig,
-	signal: AbortSignal,
-): Promise<"push" | "pull" | "merge" | "none"> {
-	const [local, remote, state] = await Promise.all([
-		createSnapshot(config),
-		readRemoteSnapshot(config, { signal }),
-		loadState(),
-	]);
-	throwIfAborted(signal);
-	if (!remote) return "push";
-	const base = state?.lastRemoteRevision
-		? await readSnapshotAt(state.lastRemoteRevision, { signal })
-		: undefined;
-	throwIfAborted(signal);
-	const plan = planMerge(local, remote, base);
-	if (plan.conflicts.length > 0) return "merge";
-	if (plan.takeLocal.length > 0 && plan.takeRemote.length > 0) return "merge";
-	if (plan.takeLocal.length > 0) return "push";
-	if (plan.takeRemote.length > 0) return "pull";
-	return "none";
-}
-
-async function runShutdownPush(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
-	const config = await loadConfig();
-	throwIfAborted(signal);
-	if (config.remote.length === 0 || !config.automatic) return;
-	await operations.push(ctx, config);
+	// Non-destructive: fetch the remote snapshot and refresh the status-bar
+	// indicator. Never pushes, pulls or merges on its own.
+	await operations.fetch(ctx, config, { quiet: true });
 }
 
 async function handleCommand(rawArgs: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -288,10 +220,6 @@ function waitForAbort(signal: AbortSignal): Promise<never> {
 		}
 		signal.addEventListener("abort", rejectWithReason, { once: true });
 	});
-}
-
-function combineSignals(primary: AbortSignal, secondary?: AbortSignal): AbortSignal {
-	return secondary ? AbortSignal.any([primary, secondary]) : primary;
 }
 
 function errorMessage(error: unknown): string {

@@ -21,6 +21,7 @@ import { mergeSnapshot, mergeTexts, planMerge, textFromSnapshot } from "./merge.
 import { agentDir, syncRootPath } from "./paths.js";
 import { createSnapshot, type Snapshot, snapshotSha256 } from "./snapshot.js";
 import { loadState, saveState } from "./state.js";
+import { deriveSyncStatus, syncIndicatorText } from "./status.js";
 
 export interface SyncResult {
 	pushed: boolean;
@@ -36,6 +37,29 @@ export interface OperationContext {
 }
 
 export type CommandContext = ExtensionCommandContext | ExtensionContext;
+
+/**
+ * Refresh the persistent status-bar sync indicator from the last known
+ * local↔remote state. Never fetches; call after fetch/pull/push/merge.
+ */
+export async function refreshIndicator(ctx: OperationContext, config: SyncConfig): Promise<void> {
+	try {
+		const [local, remote, state] = await Promise.all([
+			createSnapshot(config),
+			readRemoteSnapshot(config),
+			loadState(),
+		]);
+		const base = state?.lastRemoteRevision
+			? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
+			: undefined;
+		ctx.ui.setStatus("sync", syncIndicatorText(deriveSyncStatus(local, remote, base)));
+	} catch {
+		ctx.ui.setStatus(
+			"sync",
+			syncIndicatorText({ label: "unknown", ahead: 0, behind: 0, conflicts: 0 }),
+		);
+	}
+}
 
 export async function status(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {
 	await fetchRemote(config, { signal: ctx.signal });
@@ -146,21 +170,26 @@ export async function pull(ctx: CommandContext, config: SyncConfig): Promise<Syn
 	return { pushed: false, pulled: true, merged: false, message };
 }
 
-export async function fetch(ctx: CommandContext, config: SyncConfig): Promise<SyncResult> {
+export async function fetch(
+	ctx: CommandContext,
+	config: SyncConfig,
+	options: { quiet?: boolean } = {},
+): Promise<SyncResult> {
 	await fetchRemote(config, { signal: ctx.signal });
 	const [remote, remoteRevision, local] = await Promise.all([
 		readRemoteSnapshot(config),
 		readRemoteRevision(config),
 		createSnapshot(config),
 	]);
+	await refreshIndicator(ctx, config);
 	if (!remote) {
 		const message = "Remote is empty. Run /sync push to publish local content.";
-		ctx.ui.notify(message, "info");
+		if (!options.quiet) ctx.ui.notify(message, "info");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
 	const summary = diffSummary(local, remote);
 	const message = `Fetched ${remote.files.length} files from ${config.branch} (${shortId(remoteRevision ?? "")}). ${describeChanges(summary)}.`;
-	ctx.ui.notify(message, summary.identical ? "info" : "warning");
+	if (!options.quiet) ctx.ui.notify(message, summary.identical ? "info" : "warning");
 	return { pushed: false, pulled: false, merged: false, message };
 }
 

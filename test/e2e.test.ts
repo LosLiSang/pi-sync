@@ -199,3 +199,37 @@ test("arbitrary agent-relative include entries push and pull", async () => {
 		"# teach\n",
 	);
 });
+
+test("quiet fetch suppresses notifications and refreshes the indicator", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	const {
+		ctx: quietCtx,
+		notifications,
+		statuses,
+	} = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.fetch(quietCtx, cfg, { quiet: true });
+	assert.equal(notifications.length, 0);
+	assert.ok(
+		statuses.some((entry) => entry.key === "sync" && entry.text === "sync: up-to-date"),
+		`expected up-to-date indicator, got ${JSON.stringify(statuses)}`,
+	);
+});
+
+test("fetch refreshes the indicator when the remote has new changes", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	// Remote gains a change; local stays put.
+	await simulateRemotePush('{"theme":"remote-change"}\n');
+
+	const { ctx: fetchCtx, statuses } = createMockContext({ hasUI: true, mode: "rpc" });
+	await operations.fetch(fetchCtx, cfg);
+	assert.ok(
+		statuses.some((entry) => entry.key === "sync" && entry.text === "sync: 1 behind — pull"),
+		`expected behind indicator, got ${JSON.stringify(statuses)}`,
+	);
+});
