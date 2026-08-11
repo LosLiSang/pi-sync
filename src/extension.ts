@@ -6,6 +6,7 @@ import type {
 import { loadConfig } from "./config.js";
 import { runConfigEditor } from "./config-ui.js";
 import * as operations from "./operations.js";
+import { syncBusyText } from "./status.js";
 import { runSetupWizard } from "./wizard.js";
 
 const STATUS_KEY = "sync";
@@ -39,6 +40,9 @@ export default function sync(pi: ExtensionAPI): void {
 	let backgroundSync: BackgroundSync | undefined;
 
 	const startBackgroundSync = (ctx: ExtensionContext, signal: AbortSignal) => {
+		// While the automatic fetch is in flight the indicator shows the busy
+		// state; refreshIndicator replaces it with the real state when done.
+		ctx.ui.setStatus(STATUS_KEY, syncBusyText());
 		const settled = (async () => {
 			try {
 				await runAutomaticSync(ctx, signal);

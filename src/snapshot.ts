@@ -31,6 +31,31 @@ export function fileHashMap(snapshot: Snapshot): Map<string, string> {
 	return new Map(snapshot.files.map((file) => [file.path, file.sha256]));
 }
 
+/**
+ * True when a snapshot path falls under an include entry: exact match or a
+ * directory prefix, case-insensitive. This is the single include-matching
+ * rule used by projection, write-back targeting and content mapping.
+ */
+export function pathMatchesInclude(relativePath: string, entry: string): boolean {
+	const lower = entry.toLowerCase();
+	const pathLower = relativePath.toLowerCase();
+	return pathLower === lower || pathLower.startsWith(`${lower}/`);
+}
+
+/**
+ * Project a snapshot onto the include set: keep only paths covered by the
+ * declaration. The local snapshot is always a projection (`createSnapshot`
+ * scans include only); remote and historical snapshots are projected before
+ * merge and reporting so out-of-include leftovers never participate.
+ */
+export function projectSnapshot(snapshot: Snapshot, include: string[]): Snapshot {
+	const files = snapshot.files.filter((file) =>
+		include.some((entry) => pathMatchesInclude(file.path, entry)),
+	);
+	if (files.length === snapshot.files.length) return snapshot;
+	return { ...snapshot, files };
+}
+
 /** Build the current snapshot of the configured include paths under the agent dir. */
 export async function createSnapshot(config: SyncConfig): Promise<Snapshot> {
 	const files: SnapshotFile[] = [];

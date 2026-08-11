@@ -466,6 +466,78 @@ test("full loop closes: init -> config -> status -> pull conflict -> merge -> pu
 	assert.ok((n3.at(-1)?.message ?? "").includes("sync: up-to-date"));
 });
 
+test("out-of-include remote changes do not conflict after include shrinkage", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	writeAgentFile("skills/x/SKILL.md", "# old\n");
+	const cfg = await config({ include: ["settings.json", "skills"] });
+	await operations.push(ctx(), cfg);
+
+	// A remote machine still on the old include edits the out-of-include file.
+	await simulateRemotePushFiles({
+		"settings.json": '{"theme":"dark"}\n',
+		"skills/x/SKILL.md": "# new\n",
+	});
+
+	// Local shrinks include; pulling must ignore the out-of-include change.
+	const cfgNarrow = await config({ include: ["settings.json"] });
+	await operations.fetch(ctx(), cfgNarrow);
+	const result = await operations.pull(ctx(), cfgNarrow);
+	assert.equal(result.conflicts?.length ?? 0, 0);
+	assert.equal(result.merged, false);
+	assert.equal(result.pulled, false);
+
+	// The disk file is untouched (snapshot deletion never removes files).
+	assert.equal(
+		require("node:fs").readFileSync(
+			path.join(home, ".pi", "agent", "skills", "x", "SKILL.md"),
+			"utf8",
+		),
+		"# old\n",
+	);
+
+	// Pushing publishes a clean projected tree; the remote snapshot holds only
+	// in-scope files. --force because the pull above was a no-op (state stays
+	// behind the remote revision), so the conservative push guard would block.
+	await operations.push(ctx(), cfgNarrow, { force: true });
+	const cloneDir = path.join(home, "verify-projected");
+	await runGit(["clone", "--quiet", "--branch", "pi-sync", remoteDir, cloneDir], { cwd: home });
+	const files = await runGit(["ls-tree", "-r", "--name-only", "HEAD"], { cwd: cloneDir });
+	rmSync(cloneDir, { recursive: true, force: true });
+	assert.deepEqual(files.stdout.trim().split("\n").filter(Boolean), ["pi-sync/snapshot.json"]);
+	// A fetch refreshes the remote-tracking ref; only then does the local
+	// view of the remote snapshot reflect the push.
+	await operations.fetch(ctx(), cfgNarrow);
+	const remote = await readRemoteSnapshot(cfgNarrow);
+	assert.ok(remote);
+	assert.deepEqual(
+		remote.files.map((file) => file.path),
+		["settings.json"],
+	);
+}, 15_000);
+
+async function simulateRemotePushFiles(
+	files: Record<string, string>,
+	branch = "pi-sync",
+): Promise<void> {
+	const cloneDir = path.join(home, "simulate");
+	await runGit(["clone", "--quiet", "--branch", branch, remoteDir, cloneDir], { cwd: home });
+	mkdirSync(path.join(cloneDir, "pi-sync"), { recursive: true });
+	const snapshot = {
+		version: 1,
+		createdAt: new Date().toISOString(),
+		files: Object.entries(files).map(([pathName, content]) => ({
+			path: pathName,
+			sha256: createHash("sha256").update(content).digest("hex"),
+			contentBase64: Buffer.from(content).toString("base64"),
+		})),
+	};
+	writeFileSync(path.join(cloneDir, "pi-sync", "snapshot.json"), `${JSON.stringify(snapshot)}\n`);
+	await runGit(["add", "--", "pi-sync/snapshot.json"], { cwd: cloneDir });
+	await runGit(["commit", "--quiet", "-m", "simulated remote change"], { cwd: cloneDir });
+	await runGit(["push", "--quiet", "origin", `HEAD:${branch}`], { cwd: cloneDir });
+	await rmSync(cloneDir, { recursive: true, force: true });
+}
+
 test("init re-creates the config when the existing pi-sync.json is broken", async () => {
 	// A machine carrying an old-format config (no remote field) must still be
 	// able to run the init wizard and get a fresh valid config.

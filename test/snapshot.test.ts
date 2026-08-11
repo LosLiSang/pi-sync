@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "vitest";
 import type { SyncConfig } from "../src/config.js";
-import { createSnapshot, fileHashMap, snapshotFileContent } from "../src/snapshot.js";
+import {
+	createSnapshot,
+	fileHashMap,
+	projectSnapshot,
+	snapshotFileContent,
+} from "../src/snapshot.js";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let home: string;
@@ -79,4 +84,32 @@ test("createSnapshot captures arbitrary agent-relative include entries", async (
 	const hashes = fileHashMap(snapshot);
 	assert.deepEqual([...hashes.keys()].sort(), ["AGENTS.md", "prompts/teach.md"]);
 	assert.equal(snapshotFileContent(snapshot, "AGENTS.md"), "# instructions\n");
+});
+
+test("projectSnapshot keeps only paths under the include set", async () => {
+	const snapshot = {
+		version: 1,
+		createdAt: "2026-08-11T00:00:00.000Z",
+		files: [
+			{ path: "settings.json", sha256: "a", contentBase64: "c2V0dGluZ3M=" },
+			{ path: "skills/foo/SKILL.md", sha256: "b", contentBase64: "c2tpbGw=" },
+			// A sibling that merely shares the prefix must not match.
+			{ path: "skillsfoo/other.md", sha256: "c", contentBase64: "bm8=" },
+			{ path: "prompts/teach.md", sha256: "d", contentBase64: "dGVhY2g=" },
+		],
+	};
+	const projected = projectSnapshot(snapshot, ["settings.json", "skills"]);
+	assert.deepEqual(
+		projected.files.map((file) => file.path),
+		["settings.json", "skills/foo/SKILL.md"],
+	);
+	// Matching is case-insensitive on both sides.
+	const upper = projectSnapshot(snapshot, ["Settings.json", "SKILLS"]);
+	assert.deepEqual(
+		upper.files.map((file) => file.path),
+		["settings.json", "skills/foo/SKILL.md"],
+	);
+	// Fully-matching include set returns the same snapshot unchanged.
+	const same = projectSnapshot(snapshot, ["settings.json", "skills", "skillsfoo", "prompts"]);
+	assert.equal(same, snapshot);
 });

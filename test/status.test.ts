@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "vitest";
 import type { Snapshot } from "../src/snapshot.js";
-import { deriveSyncStatus, syncIndicatorText } from "../src/status.js";
+import { deriveSyncStatus, syncBusyText, syncIndicatorText } from "../src/status.js";
 
 function sha256(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
@@ -71,4 +71,8 @@ test("no remote snapshot is unpublished", () => {
 	const info = deriveSyncStatus(local, undefined, undefined);
 	assert.equal(info.label, "unpublished");
 	assert.equal(syncIndicatorText(info), "sync: unpublished — push");
+});
+
+test("syncBusyText shows the in-flight background sync state", () => {
+	assert.equal(syncBusyText(), "sync: fetching…");
 });

@@ -35,7 +35,13 @@ import {
 } from "./merge-session.js";
 import { agentDir, syncRootPath } from "./paths.js";
 import { runBlockResolver } from "./resolve.js";
-import { createSnapshot, type Snapshot, snapshotSha256 } from "./snapshot.js";
+import {
+	createSnapshot,
+	pathMatchesInclude,
+	projectSnapshot,
+	type Snapshot,
+	snapshotSha256,
+} from "./snapshot.js";
 import { loadState, saveState } from "./state.js";
 import { deriveSyncStatus, type SyncStatusInfo, syncIndicatorText } from "./status.js";
 
@@ -65,10 +71,15 @@ export async function refreshIndicator(ctx: OperationContext, config: SyncConfig
 			readRemoteSnapshot(config),
 			loadState(),
 		]);
+		const projectedRemote = remote ? projectSnapshot(remote, config.include) : undefined;
 		const base = state?.lastRemoteRevision
 			? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
 			: undefined;
-		ctx.ui.setStatus("sync", syncIndicatorText(deriveSyncStatus(local, remote, base)));
+		const projectedBase = base ? projectSnapshot(base, config.include) : undefined;
+		ctx.ui.setStatus(
+			"sync",
+			syncIndicatorText(deriveSyncStatus(local, projectedRemote, projectedBase)),
+		);
 	} catch {
 		ctx.ui.setStatus(
 			"sync",
@@ -90,10 +101,12 @@ export async function status(
 		readRemoteSnapshot(config),
 		loadState(),
 	]);
+	const projectedRemote = remote ? projectSnapshot(remote, config.include) : undefined;
 	const base = state?.lastRemoteRevision
 		? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
 		: undefined;
-	const info = deriveSyncStatus(local, remote, base);
+	const projectedBase = base ? projectSnapshot(base, config.include) : undefined;
+	const info = deriveSyncStatus(local, projectedRemote, projectedBase);
 	const mergeSession = await loadMergeSession();
 	await refreshIndicator(ctx, config);
 	const lines = [
@@ -107,8 +120,8 @@ export async function status(
 		);
 	}
 	lines.push(nextStepHint(info, mergeSession !== undefined));
-	if (options.diff && remote) {
-		lines.push("", formatSnapshotDiff(local, remote));
+	if (options.diff && projectedRemote) {
+		lines.push("", formatSnapshotDiff(local, projectedRemote));
 	}
 	const level = info.label === "up-to-date" && !mergeSession ? "info" : "warning";
 	ctx.ui.notify(lines.join("\n"), level);
@@ -196,10 +209,12 @@ export async function pull(
 		ctx.ui.notify(message, "warning");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
+	const projectedRemote = projectSnapshot(remote, config.include);
 	const base = state?.lastRemoteRevision
 		? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
 		: undefined;
-	const plan = planMerge(local, remote, base);
+	const projectedBase = base ? projectSnapshot(base, config.include) : undefined;
+	const plan = planMerge(local, projectedRemote, projectedBase);
 	const diverged =
 		plan.conflicts.length > 0 || (plan.takeLocal.length > 0 && plan.takeRemote.length > 0);
 
@@ -214,7 +229,7 @@ export async function pull(
 			return { pushed: false, pulled: false, merged: false, message };
 		}
 		// Fast-forward: apply the merged snapshot (remote-only changes).
-		const merged = mergeSnapshot(local, remote, plan);
+		const merged = mergeSnapshot(local, projectedRemote, plan);
 		await applySnapshot(merged, config);
 		await saveState({
 			version: 1,
@@ -231,22 +246,30 @@ export async function pull(
 
 	if (options.force) {
 		const backup = await backupLocalFiles(local);
-		await applySnapshot(remote, config);
+		await applySnapshot(projectedRemote, config);
 		await saveState({
 			version: 1,
-			lastAppliedSnapshot: snapshotSha256(remote),
+			lastAppliedSnapshot: snapshotSha256(projectedRemote),
 			lastRemoteRevision: remoteRevision,
-			lastHashes: Object.fromEntries(remote.files.map((file) => [file.path, file.sha256])),
+			lastHashes: Object.fromEntries(projectedRemote.files.map((file) => [file.path, file.sha256])),
 		});
 		await clearMergeSession();
 		await refreshIndicator(ctx, config);
-		const message = `Overwrote local files with the remote snapshot (${remote.files.length} files). Backup: ${backup}`;
+		const message = `Overwrote local files with the remote snapshot (${projectedRemote.files.length} files). Backup: ${backup}`;
 		ctx.ui.notify(message, "warning");
 		return { pushed: false, pulled: true, merged: false, message };
 	}
 
 	if (options.merge) {
-		return startMergeFlow(ctx, config, local, remote, base, plan, remoteRevision ?? "");
+		return startMergeFlow(
+			ctx,
+			config,
+			local,
+			projectedRemote,
+			projectedBase,
+			plan,
+			remoteRevision ?? "",
+		);
 	}
 
 	const message =
@@ -402,14 +425,15 @@ export async function fetch(
 		readRemoteRevision(config),
 		createSnapshot(config),
 	]);
+	const projectedRemote = remote ? projectSnapshot(remote, config.include) : undefined;
 	await refreshIndicator(ctx, config);
-	if (!remote) {
+	if (!projectedRemote) {
 		const message = "Remote is empty. Run /sync push to publish local content.";
 		if (!options.quiet) ctx.ui.notify(message, "info");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const summary = diffSummary(local, remote);
-	const message = `Fetched ${remote.files.length} files from ${config.branch} (${shortId(remoteRevision ?? "")}). ${describeChanges(summary)}.`;
+	const summary = diffSummary(local, projectedRemote);
+	const message = `Fetched ${projectedRemote.files.length} files from ${config.branch} (${shortId(remoteRevision ?? "")}). ${describeChanges(summary)}.`;
 	if (!options.quiet) ctx.ui.notify(message, summary.identical ? "info" : "warning");
 	return { pushed: false, pulled: false, merged: false, message };
 }
@@ -489,12 +513,7 @@ export async function applySnapshot(snapshot: Snapshot, config: SyncConfig): Pro
 
 function resolveSnapshotTarget(relativePath: string, config: SyncConfig): string | undefined {
 	if (relativePath.split("/").some((segment) => segment === "..")) return undefined;
-	const entry = config.include.find((candidate) => {
-		const lower = candidate.toLowerCase();
-		return (
-			relativePath.toLowerCase() === lower || relativePath.toLowerCase().startsWith(`${lower}/`)
-		);
-	});
+	const entry = config.include.find((candidate) => pathMatchesInclude(relativePath, candidate));
 	if (!entry) return undefined;
 	const root = syncRootPath(entry);
 	const suffix = relativePath.slice(entry.length);
