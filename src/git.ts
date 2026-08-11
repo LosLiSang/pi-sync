@@ -221,6 +221,10 @@ export async function publishSnapshot(
 	} catch {
 		// Remote branch does not exist yet; publish from the empty HEAD.
 	}
+	// The mirror tracks only pi-sync/snapshot.json. The reset aligned the
+	// index to the remote tip, which may carry legacy or foreign paths;
+	// empty the index so the published commit never drags them along.
+	await runGit(["read-tree", "--empty"], { cwd: repo, signal: options.signal });
 	await fs.mkdir(path.dirname(snapshotFilePath()), { recursive: true });
 	await fs.writeFile(snapshotFilePath(), `${JSON.stringify(snapshot, null, "\t")}\n`, {
 		mode: 0o600,
@@ -293,7 +297,12 @@ function isMissingRefError(stderr: string): boolean {
 		stderr.includes("bad revision") ||
 		stderr.includes("not a valid object name") ||
 		stderr.includes("invalid object name") ||
-		stderr.includes("does not exist in")
+		stderr.includes("does not exist in") ||
+		// git resolves <ref>:<path> by checking the working tree too: when the
+		// path is absent from the ref but a same-named file exists on disk it
+		// reports "exists on disk, but not in '<ref>'". Both mean the ref has
+		// no snapshot file.
+		stderr.includes("exists on disk, but not in")
 	);
 }
 
