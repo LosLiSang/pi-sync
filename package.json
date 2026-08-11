@@ -1,5 +1,5 @@
 {
-	"name": "@loslisang/pi-sync",
+	"name": "@lisang233/pi-sync",
 	"version": "0.1.0",
 	"description": "Personal Pi extension that syncs Pi configuration through Git with background auto-sync and git-style fetch/merge conflict handling.",
 	"type": "module",

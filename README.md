@@ -23,7 +23,7 @@ pi install -l ~/Documents/code/pi-sync
 or from npm once published:
 
 ```bash
-pi install npm:@loslisang/pi-sync
+pi install npm:@lisang233/pi-sync
 ```
 
 ## 🚀 Quick start
