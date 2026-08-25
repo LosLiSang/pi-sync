@@ -1,18 +1,30 @@
 # 🔄 pi-sync
 
-A personal Pi extension that syncs Pi configuration through **Git** with git-style `fetch`/`pull`/`merge`/`push`, a single config file, and conflict resolution inside the Pi UI.
+A personal Pi extension that syncs Pi configuration through **Git** using the real
+file tree — each synced file lives in the repo as its actual file, so conflict
+detection and merging are handled by git itself.
 
-> **Experimental.** This is a from-scratch rewrite of the classic pi-sync flow: one config file, one git remote, content-level diffs, three-way merges, and deliberate commands that never move your files without asking.
+> **Experimental.** A from-scratch rewrite that treats the remote repo as a
+> genuine file tree instead of a single packed snapshot. Conflicts resolve
+> through git's native three-way merge; the base is git's real merge-base, so a
+> fresh machine or a force-pushed remote never causes a false conflict.
 
 ## ✨ Features
 
-- **Single config, direct connection** — one `pi-sync.json` points at one git remote and branch. No two-level setup/connection model.
-- **Observe-only automatic** — `automatic: true` fetches at session start and shows a persistent status-bar indicator (up-to-date / ahead / behind / conflict). It never pushes, pulls or merges on its own.
-- **Git-style pull** — `/sync pull` fetches and merges. Clean changes apply directly; divergence without a flag writes nothing; `--force` overwrites local files; `--merge` opens in-UI conflict resolution.
-- **In-UI conflict resolution** — divergent edits are parsed into conflict blocks and resolved one at a time (keep local / keep remote / type a replacement). Progress persists across sessions; `/sync merge` resumes, `/sync merge --abort` restores the pre-merge backup.
-- **JSON-aware merging** — single-line `settings.json`/`keybindings.json`/`models.json` merge field-wise, so formatting or an unrelated field change doesn't conflict.
-- **Closed-loop status** — `/sync status` shows the effective config, the sync state, any in-progress merge, and the exact next step; `/sync status --diff` shows the content-level diff (JSON pretty-printed, secrets masked, bounded).
-- **No stored credentials** — Git uses your existing SSH/credential-helper setup; the config file never holds tokens.
+- **Real file tree, not a blob** — the remote branch holds `settings.json`,
+  `skills/…`, `prompts/…` as real files. Git does per-path, per-line detection
+  and merging; no hand-rolled snapshot engine.
+- **Git-native conflict detection** — the base is git's merge-base, not a local
+  anchor file. A new machine's first `pull` adopts the remote cleanly; a
+  rewritten remote doesn't spuriously conflict.
+- **Git-native three-way merge** — `/sync pull` merges the remote branch into
+  the local side. Divergent edits produce real conflict markers in the actual
+  files; `/sync merge` completes once you resolve them, `--abort` discards.
+- **Deliberate commands** — nothing moves your files without being asked;
+  `automatic` only observes at session start.
+- **Sensible defaults** — one `pi-sync.json` points at a git remote and branch,
+  an `include` list, and `automatic`.
+- **No stored credentials** — git uses your existing SSH/credential helper.
 
 ## 📦 Install
 
@@ -32,10 +44,10 @@ pi install npm:@lisang233/pi-sync
 /sync init         # first-run wizard: remote, branch, include, automatic
 /sync config       # view and edit the config at any time
 /sync status       # config + sync state + next step (--diff for content)
-/sync fetch        # pull the remote snapshot without applying
-/sync pull         # fetch + merge (--force overwrites, --merge resolves)
-/sync merge        # continue an in-progress merge (--abort discards)
-/sync push         # publish local snapshot (--force overwrites remote)
+/sync fetch        # pull the remote tree without applying
+/sync pull         # fetch + merge (--force overwrites local)
+/sync merge        # complete an in-progress merge (--abort discards)
+/sync push         # publish the local tree (--force overwrites remote)
 ```
 
 ## ⚙️ Settings
@@ -60,9 +72,18 @@ The config lives at `~/.pi/agent/pi-sync.json` (agent dir honors `PI_CODING_AGEN
 }
 ```
 
-- `include` selects which agent-dir paths sync. The defaults are `settings.json`, `keybindings.json`, `models.json`, `skills`, `prompts`, `themes`, `extensions`, and `extension-settings`. Sessions and `AGENTS.md` are intentionally not included by default. Edit it any time with `/sync config`.
-- `automatic` only controls whether a non-destructive fetch runs at session start; the status-bar indicator always reflects the last known state.
-- State lives under `<agent-dir>/pi-sync/` (a mirror git repo, `state.json`, `merge-session/`, and backups).
+- `include` selects which agent-dir paths sync. The defaults are `settings.json`,
+  `keybindings.json`, `models.json`, `skills`, `prompts`, `themes`, `extensions`,
+  and `extension-settings`. Sessions and `AGENTS.md` are not synced by default.
+- `automatic` only controls whether a non-destructive `fetch` runs at session
+  start; the status-bar indicator always reflects the last known state.
+- A mirror git repo lives under `<agent-dir>/pi-sync/mirror/` and is checked out
+  on the configured branch.
+
+> Note: with a real file tree, any sensitive token in a synced config is stored
+> in the git repo as plaintext (like any dotfile repo). It is not hidden, and it
+> is not encrypted. Use a private remote and a credential helper that keeps
+> `~/.git-credentials` out of the repo.
 
 ## 🗂️ Package layout
 
@@ -73,16 +94,11 @@ src/
   config.ts         single-file config load/validate/save
   config-ui.ts      interactive config editor (view + edit fields)
   paths.ts          agent-dir paths and include normalization
-  git.ts            git subprocess backend (fetch/push/show/merge-file)
-  snapshot.ts       scan include paths into a hashed snapshot
-  state.ts          last-applied snapshot + remote revision
-  status.ts         sync-state derivation and indicator text
-  merge-session.ts  persistent conflict-resolution session store
-  conflict.ts       diff3 marker parsing and resolved-text splicing
-  resolve.ts        structured block-by-block conflict resolver
+  git.ts            git subprocess backend (real-file-tree fetch/push/merge)
+  tree.ts           sync agent-dir <-> mirror work tree (real files)
+  status.ts         sync-state derivation (git merge-base) and indicator
   diff.ts           content-level diff with JSON formatting and secret masking
-  merge.ts          three-way merge (JSON field-wise + git merge-file fallback)
-  operations.ts     status/push/pull/fetch/merge
+  operations.ts     status/push/pull/fetch/merge orchestration
   wizard.ts         first-run setup wizard
 test/               vitest unit + local-bare-repo end-to-end tests
 ```
