@@ -28,10 +28,10 @@ const USAGE = [
 	"  init                first-run setup wizard",
 	"  config              view and edit the config",
 	"  status              config + sync state + next step (--diff for content)",
-	"  fetch               fetch the remote snapshot without applying",
-	"  pull                fetch + merge (--force overwrites, --merge resolves)",
+	"  fetch               fetch the remote tree without applying",
+	"  pull                fetch + merge (--force overwrites local)",
 	"  merge               continue an in-progress merge (--abort discards)",
-	"  push                publish local snapshot (--force overwrites remote)",
+	"  push                publish local tree (--force overwrites remote)",
 	"  help                show this help",
 ].join("\n");
 
@@ -85,9 +85,7 @@ export default function sync(pi: ExtensionAPI): void {
 		for (const current of tasks) {
 			if (!current) continue;
 			try {
-				await (signal
-					? Promise.race([current.settled, waitForAbort(signal)])
-					: current.settled);
+				await (signal ? Promise.race([current.settled, waitForAbort(signal)]) : current.settled);
 			} catch {
 				// The shutdown deadline or a replacement aborted while draining; the
 				// background task observes its own session signal and settles on its own.
@@ -168,11 +166,7 @@ async function runAutomaticSync(ctx: ExtensionContext, signal: AbortSignal): Pro
 async function handleCommand(
 	rawArgs: string,
 	ctx: ExtensionCommandContext,
-	runPush: (
-		ctx: ExtensionCommandContext,
-		config: SyncConfig,
-		force: boolean,
-	) => Promise<void>,
+	runPush: (ctx: ExtensionCommandContext, config: SyncConfig, force: boolean) => Promise<void>,
 ): Promise<void> {
 	const [first = "", ...restTokens] = rawArgs.trim().split(/\s+/u);
 	const subcommand = normalizeSubcommand(first);
@@ -209,10 +203,7 @@ async function handleCommand(
 			await runPush(ctx, config, force);
 			return;
 		case "pull":
-			await operations.pull(ctx, config, {
-				force,
-				merge: restTokens.some((token) => token === "--merge"),
-			});
+			await operations.pull(ctx, config, { force });
 			return;
 		case "fetch":
 			await operations.fetch(ctx, config);

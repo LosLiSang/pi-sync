@@ -27,8 +27,9 @@ export const DEFAULT_CONFIG: SyncConfig = {
 	automatic: true,
 };
 
-export const SNAPSHOT_FILE = "snapshot.json";
-export const BACKUP_DIR = "backups";
+export function shortId(value: string): string {
+	return value.length > 10 ? value.slice(0, 10) : value;
+}
 
 export function configPath(): string {
 	return path.join(agentDir(), CONFIG_FILE_NAME);
@@ -40,14 +41,6 @@ export function stateDir(): string {
 
 export function mirrorRepoDir(): string {
 	return path.join(stateDir(), "mirror");
-}
-
-export function snapshotFilePath(): string {
-	return path.join(mirrorRepoDir(), "pi-sync", SNAPSHOT_FILE);
-}
-
-export function backupRootDir(): string {
-	return path.join(stateDir(), BACKUP_DIR);
 }
 
 export async function loadConfig(): Promise<SyncConfig> {

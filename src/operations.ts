@@ -1,49 +1,37 @@
-import type { Dirent } from "node:fs";
-import fs from "node:fs/promises";
-import path from "node:path";
 import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import type { SyncConfig } from "./config.js";
-import { backupRootDir, stateDir } from "./config.js";
-import { applyResolutions, parseConflictBlocks } from "./conflict.js";
-import { diffSummary, formatSnapshotDiff } from "./diff.js";
+import { shortId, stateDir } from "./config.js";
+import { formatConfig } from "./config-ui.js";
+import { diffSummary, formatDiff } from "./diff.js";
 import {
+	abortMerge,
+	aheadBehind,
+	commitSync,
+	completeMerge,
+	ensureBranch,
+	ensureMirror,
 	fetchRemote,
-	isRemoteUpToDate,
-	publishSnapshot,
+	isMergeInProgress,
+	listConflictedPaths,
+	mergeRemote,
+	pushBranch,
+	readMergeBase,
+	readRemoteFiles,
 	readRemoteRevision,
-	readRemoteSnapshot,
-	readSnapshotAt,
+	resetHard,
+	stageAll,
 } from "./git.js";
+import { classifyState, type StateClassify, syncIndicatorText } from "./status.js";
 import {
-	type MergeOutcome,
-	mergeSnapshot,
-	mergeTexts,
-	planMerge,
-	textFromSnapshot,
-} from "./merge.js";
-import {
-	clearMergeSession,
-	hasMergeSession,
-	loadMergeSession,
-	type MergeFileState,
-	type MergeSessionData,
-	saveMergeSession,
-} from "./merge-session.js";
-import { agentDir, syncRootPath } from "./paths.js";
-import { runBlockResolver } from "./resolve.js";
-import {
-	createSnapshot,
-	pathMatchesInclude,
-	projectSnapshot,
-	type Snapshot,
-	snapshotSha256,
-} from "./snapshot.js";
-import { loadState, saveState } from "./state.js";
-import { deriveSyncStatus, type SyncStatusInfo, syncIndicatorText } from "./status.js";
+	collectAgentFiles,
+	copyMirrorToAgent,
+	graftAgentIntoMirror,
+	readAgentContents,
+} from "./tree.js";
 
 export interface SyncResult {
 	pushed: boolean;
@@ -60,26 +48,13 @@ export interface OperationContext {
 
 export type CommandContext = ExtensionCommandContext | ExtensionContext;
 
-/**
- * Refresh the persistent status-bar sync indicator from the last known
- * local↔remote state. Never fetches; call after fetch/pull/push/merge.
- */
+const LOCAL_COMMIT_MESSAGE = "pi-sync: local";
+
+/** Refresh the persistent status-bar sync indicator from the last known state. */
 export async function refreshIndicator(ctx: OperationContext, config: SyncConfig): Promise<void> {
 	try {
-		const [local, remote, state] = await Promise.all([
-			createSnapshot(config),
-			readRemoteSnapshot(config),
-			loadState(),
-		]);
-		const projectedRemote = remote ? projectSnapshot(remote, config.include) : undefined;
-		const base = state?.lastRemoteRevision
-			? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
-			: undefined;
-		const projectedBase = base ? projectSnapshot(base, config.include) : undefined;
-		ctx.ui.setStatus(
-			"sync",
-			syncIndicatorText(deriveSyncStatus(local, projectedRemote, projectedBase)),
-		);
+		const info = await computeState(config, ctx.signal);
+		ctx.ui.setStatus("sync", syncIndicatorText(info));
 	} catch {
 		ctx.ui.setStatus(
 			"sync",
@@ -88,7 +63,21 @@ export async function refreshIndicator(ctx: OperationContext, config: SyncConfig
 	}
 }
 
-import { formatConfig } from "./config-ui.js";
+/**
+ * Build the current classification by comparing the agent file tree to the
+ * remote branch. Uses git's real merge-base as the base, so a fresh machine or
+ * a rewritten remote never causes a false conflict. Does not graft or write.
+ */
+async function computeState(config: SyncConfig, signal?: AbortSignal): Promise<StateClassify> {
+	await ensureMirror(config);
+	const [local, remote, base, mergePending] = await Promise.all([
+		readAgentContents(config),
+		readRemoteFiles(config, { signal }),
+		readMergeBase(config, { signal }),
+		isMergeInProgress({ signal }),
+	]);
+	return classifyState(local, remote, base, mergePending);
+}
 
 export async function status(
 	ctx: CommandContext,
@@ -96,41 +85,25 @@ export async function status(
 	options: { diff?: boolean } = {},
 ): Promise<SyncResult> {
 	// status never fetches; it reflects the last known mirror state.
-	const [local, remote, state] = await Promise.all([
-		createSnapshot(config),
-		readRemoteSnapshot(config),
-		loadState(),
-	]);
-	const projectedRemote = remote ? projectSnapshot(remote, config.include) : undefined;
-	const base = state?.lastRemoteRevision
-		? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
-		: undefined;
-	const projectedBase = base ? projectSnapshot(base, config.include) : undefined;
-	const info = deriveSyncStatus(local, projectedRemote, projectedBase);
-	const mergeSession = await loadMergeSession();
+	const info = await computeState(config, ctx.signal);
 	await refreshIndicator(ctx, config);
-	const lines = [
-		formatConfig(config),
-		`state: ${syncIndicatorText(info)}`,
-		`last applied: ${state ? shortId(state.lastAppliedSnapshot) : "never"}`,
-	];
-	if (mergeSession) {
-		lines.push(
-			`merge in progress: ${countPendingBlocks(mergeSession)} conflict block(s) unresolved — /sync merge to continue, /sync merge --abort to discard`,
-		);
+	const lines = [formatConfig(config), `state: ${syncIndicatorText(info)}`];
+	if (info.label === "conflict") {
+		lines.push(`conflicting file(s): ${info.diverged.slice(0, 5).join(", ") || "(resolving)"}`);
 	}
-	lines.push(nextStepHint(info, mergeSession !== undefined));
-	if (options.diff && projectedRemote) {
-		lines.push("", formatSnapshotDiff(local, projectedRemote));
+	lines.push(nextStepHint(info));
+	if (options.diff) {
+		const remote = await readRemoteFiles(config, { signal: ctx.signal });
+		const local = await readAgentContents(config);
+		lines.push("", formatDiff(local, remote));
 	}
-	const level = info.label === "up-to-date" && !mergeSession ? "info" : "warning";
+	const level = info.label === "up-to-date" ? "info" : "warning";
 	ctx.ui.notify(lines.join("\n"), level);
 	return { pushed: false, pulled: false, merged: false, message: "status" };
 }
 
 /** The closed-loop hint: what to do next given the current state. */
-function nextStepHint(info: SyncStatusInfo, mergePending: boolean): string {
-	if (mergePending) return "next: /sync merge (resolve) or /sync merge --abort (discard)";
+function nextStepHint(info: StateClassify): string {
 	switch (info.label) {
 		case "unconfigured":
 			return "next: /sync init";
@@ -143,7 +116,7 @@ function nextStepHint(info: SyncStatusInfo, mergePending: boolean): string {
 		case "behind":
 			return "next: /sync pull to fetch and apply remote changes";
 		case "conflict":
-			return "next: /sync pull --merge to resolve, or /sync pull --force to overwrite local";
+			return "next: /sync pull to merge, or /sync pull --force to overwrite local";
 		case "unknown":
 			return "next: /sync fetch to check the remote";
 	}
@@ -154,264 +127,117 @@ export async function push(
 	config: SyncConfig,
 	options: { force?: boolean } = {},
 ): Promise<SyncResult> {
-	await fetchRemote(config, { signal: ctx.signal });
-	if (await hasMergeSession()) {
+	const { remoteExists } = await ensureBranch(config, { signal: ctx.signal });
+	if (await isMergeInProgress({ signal: ctx.signal })) {
 		const message =
 			"A merge is in progress. Resolve it (/sync merge) or discard it (/sync merge --abort) before pushing.";
 		ctx.ui.notify(message, "error");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const [local, remoteRevision, remote, state] = await Promise.all([
-		createSnapshot(config),
-		readRemoteRevision(config),
-		readRemoteSnapshot(config),
-		loadState(),
-	]);
-	if (
-		remote &&
-		state &&
-		!isRemoteUpToDate(state.lastRemoteRevision, remoteRevision) &&
-		!options.force
-	) {
+	// Stage the local (agent) side as the current branch tip, then publish.
+	const files = await collectAgentFiles(config);
+	await graftAgentIntoMirror(config, files);
+	await stageAll({ signal: ctx.signal });
+	await commitLocalSide({ signal: ctx.signal });
+
+	if (remoteExists && !options.force && !(await isFastForward(config, ctx.signal))) {
 		const message =
-			"Remote changed since the last sync. Run /sync fetch + /sync merge to reconcile, or /sync push --force to overwrite.";
+			"Remote changed since the last sync. Run /sync pull to merge, or /sync push --force to overwrite.";
 		ctx.ui.notify(message, "error");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const revision = await publishSnapshot(config, local, { signal: ctx.signal }, options.force);
-	await saveState({
-		version: 1,
-		lastAppliedSnapshot: snapshotSha256(local),
-		lastRemoteRevision: revision,
-		lastHashes: Object.fromEntries(local.files.map((file) => [file.path, file.sha256])),
-	});
-	await clearMergeSession();
+
+	await pushBranch(config, { signal: ctx.signal }, options.force);
 	await refreshIndicator(ctx, config);
-	const message = `Pushed ${local.files.length} files from ${agentDir()} to ${config.branch}.`;
+	const message = `Pushed ${files.length} file(s) from ${stateDir()} to ${config.branch}.`;
 	ctx.ui.notify(message, "info");
 	return { pushed: true, pulled: false, merged: false, message };
+}
+
+/** True when the remote tip is an ancestor of the local branch tip (a safe fast-forward). */
+async function isFastForward(config: SyncConfig, signal?: AbortSignal): Promise<boolean> {
+	const { behind } = await aheadBehind(config, { signal });
+	return behind === 0;
+}
+
+async function commitLocalSide(options: { signal?: AbortSignal } = {}): Promise<void> {
+	await commitSync(LOCAL_COMMIT_MESSAGE, options);
 }
 
 export async function pull(
 	ctx: CommandContext,
 	config: SyncConfig,
-	options: { force?: boolean; merge?: boolean } = {},
+	options: { force?: boolean } = {},
 ): Promise<SyncResult> {
-	await fetchRemote(config, { signal: ctx.signal });
-	const [local, remote, remoteRevision, state] = await Promise.all([
-		createSnapshot(config),
-		readRemoteSnapshot(config),
-		readRemoteRevision(config),
-		loadState(),
-	]);
-	if (!remote) {
-		const message = "Remote is empty. Run /sync push first.";
-		ctx.ui.notify(message, "warning");
-		return { pushed: false, pulled: false, merged: false, message };
-	}
-	const projectedRemote = projectSnapshot(remote, config.include);
-	const base = state?.lastRemoteRevision
-		? await readSnapshotAt(state.lastRemoteRevision, { signal: ctx.signal })
-		: undefined;
-	const projectedBase = base ? projectSnapshot(base, config.include) : undefined;
-	const plan = planMerge(local, projectedRemote, projectedBase);
-	const diverged =
-		plan.conflicts.length > 0 || (plan.takeLocal.length > 0 && plan.takeRemote.length > 0);
-
-	if (!diverged) {
-		if (plan.takeRemote.length === 0) {
-			const message =
-				plan.takeLocal.length > 0
-					? "Already up to date; local is ahead. Run /sync push to publish."
-					: "Already up to date.";
-			ctx.ui.notify(message, "info");
-			await refreshIndicator(ctx, config);
-			return { pushed: false, pulled: false, merged: false, message };
-		}
-		// Fast-forward: apply the merged snapshot (remote-only changes).
-		const merged = mergeSnapshot(local, projectedRemote, plan);
-		await applySnapshot(merged, config);
-		await saveState({
-			version: 1,
-			lastAppliedSnapshot: snapshotSha256(merged),
-			lastRemoteRevision: remoteRevision,
-			lastHashes: Object.fromEntries(merged.files.map((file) => [file.path, file.sha256])),
-		});
-		await clearMergeSession();
-		await refreshIndicator(ctx, config);
-		const message = `Pulled ${plan.takeRemote.length} file(s) from ${config.branch} (${shortId(remoteRevision ?? "")}).`;
-		ctx.ui.notify(message, "info");
-		return { pushed: false, pulled: true, merged: false, message };
-	}
-
-	if (options.force) {
-		const backup = await backupLocalFiles(local);
-		await applySnapshot(projectedRemote, config);
-		await saveState({
-			version: 1,
-			lastAppliedSnapshot: snapshotSha256(projectedRemote),
-			lastRemoteRevision: remoteRevision,
-			lastHashes: Object.fromEntries(projectedRemote.files.map((file) => [file.path, file.sha256])),
-		});
-		await clearMergeSession();
-		await refreshIndicator(ctx, config);
-		const message = `Overwrote local files with the remote snapshot (${projectedRemote.files.length} files). Backup: ${backup}`;
-		ctx.ui.notify(message, "warning");
-		return { pushed: false, pulled: true, merged: false, message };
-	}
-
-	if (options.merge) {
-		return startMergeFlow(
-			ctx,
-			config,
-			local,
-			projectedRemote,
-			projectedBase,
-			plan,
-			remoteRevision ?? "",
-		);
-	}
-
-	const message =
-		"Local and remote diverged. /sync pull --merge to resolve conflicts, /sync pull --force to overwrite local files.";
-	ctx.ui.notify(message, "warning");
-	await refreshIndicator(ctx, config);
-	return { pushed: false, pulled: false, merged: false, message, conflicts: plan.conflicts };
-}
-
-/**
- * Start a conflict-resolution session: apply remote-only and cleanly-merged
- * files, write diff3 markers for divergent files, then walk the blocks with
- * the structured resolver. Persists progress block-by-block; completion writes
- * the resolved files and clears the session.
- */
-async function startMergeFlow(
-	ctx: CommandContext,
-	config: SyncConfig,
-	local: Snapshot,
-	remote: Snapshot,
-	base: Snapshot | undefined,
-	plan: MergeOutcome,
-	remoteRevision: string,
-): Promise<SyncResult> {
-	if (await hasMergeSession()) {
+	const { fresh, remoteExists } = await ensureBranch(config, { signal: ctx.signal });
+	if (await isMergeInProgress({ signal: ctx.signal })) {
 		const message =
 			"A merge is already in progress. Continue with /sync merge or discard it with /sync merge --abort.";
 		ctx.ui.notify(message, "warning");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const backup = await backupLocalFiles(local);
-	const conflictContents = new Map<string, string>();
-	const sessionFiles: MergeFileState[] = [];
-	for (const filePath of plan.conflicts) {
-		const merged = await mergeTexts(
-			textFromSnapshot(base ?? emptySnapshot(), filePath),
-			textFromSnapshot(local, filePath),
-			textFromSnapshot(remote, filePath),
-			ctx.signal,
-		);
-		conflictContents.set(filePath, merged.merged);
-		const blocks = parseConflictBlocks(merged.merged);
-		if (blocks.length > 0) {
-			sessionFiles.push({
-				path: filePath,
-				merged: merged.merged,
-				blocks: blocks.map((block) => block.block),
-			});
-		}
-	}
-	// Remote-only files and field-merged conflict files apply immediately;
-	// divergent files get their diff3 markers written to disk.
-	const toWrite = new Map<string, string>();
-	for (const filePath of plan.takeRemote) {
-		toWrite.set(filePath, textFromSnapshot(remote, filePath));
-	}
-	for (const [filePath, mergedText] of conflictContents) {
-		if (!sessionFiles.some((file) => file.path === filePath)) {
-			toWrite.set(filePath, mergedText);
-		}
-	}
-	for (const file of sessionFiles) {
-		toWrite.set(file.path, file.merged);
-	}
-	for (const [filePath, content] of toWrite) {
-		await writeAgentContent(config, filePath, content);
-	}
-	const session: MergeSessionData = {
-		baselineRevision: remoteRevision,
-		backupDir: backup,
-		createdAt: new Date().toISOString(),
-		takeRemote: plan.takeRemote.length,
-		takeLocal: plan.takeLocal.length,
-		files: sessionFiles,
-	};
-	await saveMergeSession(session);
-	await refreshIndicator(ctx, config);
-	if (sessionFiles.length === 0) {
-		return finishMergeSession(ctx, config, session, plan.takeRemote.length, plan.takeLocal.length);
-	}
-	const result = await runBlockResolver(ctx.ui, session);
-	if (!result.completed) {
-		const pending = countPendingBlocks(session);
-		const message = `Merge in progress: ${pending} conflict block(s) left. /sync merge to continue, /sync merge --abort to discard.`;
+	if (!remoteExists) {
+		const message = "Remote is empty. Run /sync push first.";
 		ctx.ui.notify(message, "warning");
-		return {
-			pushed: false,
-			pulled: false,
-			merged: true,
-			message,
-			conflicts: sessionFiles.map((file) => file.path),
-		};
+		return { pushed: false, pulled: false, merged: false, message };
 	}
-	return finishMergeSession(ctx, config, session, plan.takeRemote.length, plan.takeLocal.length);
-}
 
-/** Write the resolved files, record the applied snapshot, and clear the session. */
-async function finishMergeSession(
-	ctx: CommandContext,
-	config: SyncConfig,
-	session: MergeSessionData,
-	remoteTaken: number,
-	localKept: number,
-): Promise<SyncResult> {
-	for (const file of session.files) {
-		const content = applyResolutions(
-			file.merged,
-			file.blocks.map((block) => block.resolution),
-		);
-		await writeAgentContent(config, file.path, content);
+	// Force: throw away the local side and adopt the remote directly.
+	if (options.force) {
+		await forceAdoptRemote(config, ctx.signal);
+		await refreshIndicator(ctx, config);
+		const remote = await readRemoteFiles(config, { signal: ctx.signal });
+		const message = `Overwrote local files with the remote tree (${remote.size} files).`;
+		ctx.ui.notify(message, "warning");
+		return { pushed: false, pulled: true, merged: false, message };
 	}
-	const finalSnapshot = await createSnapshot(config);
-	await saveState({
-		version: 1,
-		lastAppliedSnapshot: snapshotSha256(finalSnapshot),
-		lastRemoteRevision: session.baselineRevision,
-		lastHashes: Object.fromEntries(finalSnapshot.files.map((file) => [file.path, file.sha256])),
-	});
-	await clearMergeSession();
+
+	// Fresh machine (first sync): adopt the remote so it never false-conflicts.
+	if (fresh) {
+		await copyMirrorToAgent(config);
+		await refreshIndicator(ctx, config);
+		const remote = await readRemoteFiles(config, { signal: ctx.signal });
+		const message = `Pulled ${remote.size} file(s) from ${config.branch} — initial sync.`;
+		ctx.ui.notify(message, "info");
+		return { pushed: false, pulled: true, merged: false, message };
+	}
+
+	// Stage local (agent) side as the branch tip, then git merge origin.
+	const files = await collectAgentFiles(config);
+	await graftAgentIntoMirror(config, files);
+	await stageAll({ signal: ctx.signal });
+	await commitLocalSide({ signal: ctx.signal });
+
+	const conflicted = await mergeRemote(config, { signal: ctx.signal });
+	await copyMirrorToAgent(config);
 	await refreshIndicator(ctx, config);
-	const resolved = session.files.reduce((sum, file) => sum + file.blocks.length, 0);
-	const message = `Merged: ${resolved} conflict block(s) resolved, ${remoteTaken} remote, ${localKept} local. Run /sync push to publish.`;
+
+	if (conflicted) {
+		const conflicts = await listConflictedPaths({ signal: ctx.signal });
+		let remoteRevision = "";
+		try {
+			remoteRevision = (await readRemoteRevision(config, { signal: ctx.signal })) ?? "";
+		} catch {
+			// ignore
+		}
+		const message = `Merge conflict in ${conflicts.length} file(s). Resolve the markers, then /sync merge. (remote ${shortId(
+			remoteRevision,
+		)})`;
+		ctx.ui.notify(message, "warning");
+		return { pushed: false, pulled: false, merged: true, message, conflicts };
+	}
+
+	await refreshIndicator(ctx, config);
+	const remote = await readRemoteFiles(config, { signal: ctx.signal });
+	const message = `Pulled ${remote.size} file(s) from ${config.branch}.`;
 	ctx.ui.notify(message, "info");
-	return { pushed: false, pulled: false, merged: true, message, conflicts: [] };
+	return { pushed: false, pulled: true, merged: false, message };
 }
 
-function countPendingBlocks(session: MergeSessionData): number {
-	return session.files.reduce(
-		(sum, file) => sum + file.blocks.filter((block) => block.resolution === undefined).length,
-		0,
-	);
-}
-
-async function writeAgentContent(
-	config: SyncConfig,
-	relativePath: string,
-	content: string,
-): Promise<void> {
-	const target = resolveSnapshotTarget(relativePath, config);
-	if (!target) return;
-	await fs.mkdir(path.dirname(target), { recursive: true });
-	await fs.writeFile(target, content);
+/** Throw away the local agent side and adopt the remote tree (--force pull). */
+async function forceAdoptRemote(config: SyncConfig, signal?: AbortSignal): Promise<void> {
+	await resetHard(config, { signal });
+	await copyMirrorToAgent(config);
 }
 
 export async function fetch(
@@ -420,21 +246,24 @@ export async function fetch(
 	options: { quiet?: boolean } = {},
 ): Promise<SyncResult> {
 	await fetchRemote(config, { signal: ctx.signal });
-	const [remote, remoteRevision, local] = await Promise.all([
-		readRemoteSnapshot(config),
-		readRemoteRevision(config),
-		createSnapshot(config),
+	const { fresh, remoteExists } = await ensureBranch(config, { signal: ctx.signal });
+	const [local, remote] = await Promise.all([
+		readAgentContents(config),
+		remoteExists ? readRemoteFiles(config, { signal: ctx.signal }) : new Map<string, string>(),
 	]);
-	const projectedRemote = remote ? projectSnapshot(remote, config.include) : undefined;
 	await refreshIndicator(ctx, config);
-	if (!projectedRemote) {
+	if (!remoteExists || remote.size === 0) {
 		const message = "Remote is empty. Run /sync push to publish local content.";
 		if (!options.quiet) ctx.ui.notify(message, "info");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const summary = diffSummary(local, projectedRemote);
-	const message = `Fetched ${projectedRemote.files.length} files from ${config.branch} (${shortId(remoteRevision ?? "")}). ${describeChanges(summary)}.`;
-	if (!options.quiet) ctx.ui.notify(message, summary.identical ? "info" : "warning");
+	const summary = diffSummary(local, remote);
+	const message = `Fetched ${remote.size} files from ${config.branch}. ${describeChanges(summary)}.`;
+	if (!options.quiet) {
+		ctx.ui.notify(message, summary.identical ? "info" : "warning");
+	}
+	// On a fresh machine, fetch alone must not overwrite the agent.
+	void fresh;
 	return { pushed: false, pulled: false, merged: false, message };
 }
 
@@ -444,92 +273,39 @@ export async function merge(
 	options: { abort?: boolean } = {},
 ): Promise<SyncResult> {
 	if (options.abort) {
-		const session = await loadMergeSession();
-		if (!session) {
+		if (!(await isMergeInProgress({ signal: ctx.signal }))) {
 			const message = "No merge in progress to abort.";
 			ctx.ui.notify(message, "info");
 			return { pushed: false, pulled: false, merged: false, message };
 		}
-		await restoreBackup(session.backupDir, config);
-		await clearMergeSession();
+		await abortMerge({ signal: ctx.signal });
+		await copyMirrorToAgent(config);
 		await refreshIndicator(ctx, config);
-		const message = "Merge aborted; local files restored from the pre-merge backup.";
+		const message = "Merge aborted; local files restored to the pre-merge state.";
 		ctx.ui.notify(message, "info");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
-	const session = await loadMergeSession();
-	if (!session) {
+
+	if (!(await isMergeInProgress({ signal: ctx.signal }))) {
 		const message =
-			"No merge in progress. Run /sync pull --merge to merge remote changes into local files.";
+			"No merge in progress. Run /sync pull to merge remote changes into local files.";
 		ctx.ui.notify(message, "info");
 		return { pushed: false, pulled: false, merged: false, message };
 	}
+
+	// The user resolved conflicts in the real agent files; graft the resolved
+	// tree back into the mirror, then commit to complete the merge.
+	const files = await collectAgentFiles(config);
+	await graftAgentIntoMirror(config, files);
+	await stageAll({ signal: ctx.signal });
+	const completed = await completeMerge(LOCAL_COMMIT_MESSAGE, { signal: ctx.signal });
+	await copyMirrorToAgent(config);
 	await refreshIndicator(ctx, config);
-	const result = await runBlockResolver(ctx.ui, session);
-	if (!result.completed) {
-		const pending = countPendingBlocks(session);
-		const message = `Merge in progress: ${pending} conflict block(s) left. /sync merge to continue, /sync merge --abort to discard.`;
-		ctx.ui.notify(message, "warning");
-		return {
-			pushed: false,
-			pulled: false,
-			merged: true,
-			message,
-			conflicts: session.files.map((file) => file.path),
-		};
-	}
-	return finishMergeSession(ctx, config, session, session.takeRemote, session.takeLocal);
-}
-
-/** Overwrite the agent dir's include paths with the pre-merge backup files. */
-async function restoreBackup(backupDir: string, config: SyncConfig): Promise<void> {
-	let entries: Dirent[];
-	try {
-		entries = await fs.readdir(backupDir, { recursive: true, withFileTypes: true });
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-		throw error;
-	}
-	for (const entry of entries) {
-		if (!entry.isFile()) continue;
-		const absPath = path.join(entry.parentPath ?? backupDir, entry.name);
-		const relative = path.relative(backupDir, absPath).split(path.sep).join("/");
-		const target = resolveSnapshotTarget(relative, config);
-		if (!target) continue;
-		await fs.mkdir(path.dirname(target), { recursive: true });
-		await fs.copyFile(absPath, target);
-	}
-}
-
-/** Apply a snapshot by writing its files back into the agent directory. */
-export async function applySnapshot(snapshot: Snapshot, config: SyncConfig): Promise<void> {
-	for (const file of snapshot.files) {
-		const target = resolveSnapshotTarget(file.path, config);
-		if (!target) continue;
-		await fs.mkdir(path.dirname(target), { recursive: true });
-		await fs.writeFile(target, Buffer.from(file.contentBase64, "base64"));
-	}
-}
-
-function resolveSnapshotTarget(relativePath: string, config: SyncConfig): string | undefined {
-	if (relativePath.split("/").some((segment) => segment === "..")) return undefined;
-	const entry = config.include.find((candidate) => pathMatchesInclude(relativePath, candidate));
-	if (!entry) return undefined;
-	const root = syncRootPath(entry);
-	const suffix = relativePath.slice(entry.length);
-	return path.join(root, suffix);
-}
-
-async function backupLocalFiles(local: Snapshot): Promise<string> {
-	const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
-	const directory = path.join(backupRootDir(), stamp);
-	await fs.mkdir(directory, { recursive: true });
-	for (const file of local.files) {
-		const target = path.join(directory, file.path);
-		await fs.mkdir(path.dirname(target), { recursive: true });
-		await fs.writeFile(target, Buffer.from(file.contentBase64, "base64"));
-	}
-	return directory;
+	const message = completed
+		? "Merge completed. Run /sync push to publish."
+		: "Merge has no further changes to record. Run /sync push to publish.";
+	ctx.ui.notify(message, "info");
+	return { pushed: false, pulled: false, merged: true, message };
 }
 
 function describeChanges(summary: ReturnType<typeof diffSummary>): string {
@@ -538,14 +314,6 @@ function describeChanges(summary: ReturnType<typeof diffSummary>): string {
 	if (summary.removed > 0) parts.push(`${summary.removed} removed`);
 	if (summary.changed > 0) parts.push(`${summary.changed} changed`);
 	return parts.length > 0 ? parts.join(", ") : "no differences";
-}
-
-function shortId(value: string): string {
-	return value.length > 10 ? value.slice(0, 10) : value;
-}
-
-function emptySnapshot(): Snapshot {
-	return { version: 1, createdAt: new Date().toISOString(), files: [] };
 }
 
 export { stateDir };

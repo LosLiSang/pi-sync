@@ -1,5 +1,4 @@
 import { createTwoFilesPatch } from "diff";
-import { fileHashMap, type Snapshot, snapshotFileContent } from "./snapshot.js";
 
 const HUNK_CONTEXT_LINES = 2;
 const MAX_HUNK_FILE_BYTES = 1024 * 1024;
@@ -15,38 +14,31 @@ const SECRET_PATTERNS = [
 	/gh[pousr]_[A-Za-z0-9_]{20,}/,
 ];
 
-export interface SnapshotDiffSummary {
+export interface DiffSummary {
 	changed: number;
 	added: number;
 	removed: number;
 	identical: boolean;
 }
 
-export function diffSummary(local: Snapshot, remote: Snapshot): SnapshotDiffSummary {
-	const localMap = fileHashMap(local);
-	const remoteMap = fileHashMap(remote);
-	const paths = [...new Set([...localMap.keys(), ...remoteMap.keys()])];
+/** Summarize the difference between two path→content maps (agent vs remote). */
+export function diffSummary(local: Map<string, string>, remote: Map<string, string>): DiffSummary {
+	const paths = new Set([...local.keys(), ...remote.keys()]);
 	let added = 0;
 	let removed = 0;
 	let changed = 0;
 	for (const filePath of paths) {
-		if (!localMap.has(filePath)) added += 1;
-		else if (!remoteMap.has(filePath)) removed += 1;
-		else if (localMap.get(filePath) !== remoteMap.get(filePath)) changed += 1;
+		if (!local.has(filePath)) added += 1;
+		else if (!remote.has(filePath)) removed += 1;
+		else if (local.get(filePath) !== remote.get(filePath)) changed += 1;
 	}
 	return { changed, added, removed, identical: added === 0 && removed === 0 && changed === 0 };
 }
 
-/** Content-level diff of local vs remote with JSON pretty-print, masking, and bounds. */
-export function formatSnapshotDiff(local: Snapshot, remote: Snapshot): string {
-	const localMap = fileHashMap(local);
-	const remoteMap = fileHashMap(remote);
-	const allPaths = [...new Set([...localMap.keys(), ...remoteMap.keys()])].sort();
-	const lines = [
-		`local: ${local.files.length} files`,
-		`remote: ${remote.createdAt} (${remote.files.length} files)`,
-		"",
-	];
+/** Content-level diff of local vs remote path→content maps (JSON pretty, masked, bounded). */
+export function formatDiff(local: Map<string, string>, remote: Map<string, string>): string {
+	const allPaths = [...new Set([...local.keys(), ...remote.keys()])].sort();
+	const lines = [`local: ${local.size} files`, `remote: ${remote.size} files`, ""];
 	let totalChanges = 0;
 	let hunkBudget = MAX_TOTAL_HUNK_LINES;
 	let truncated = false;
@@ -57,22 +49,22 @@ export function formatSnapshotDiff(local: Snapshot, remote: Snapshot): string {
 		if (hunks.at(-1) === TRUNCATED_MARKER) truncated = true;
 	};
 	for (const filePath of allPaths) {
-		if (!localMap.has(filePath)) {
+		if (!local.has(filePath)) {
 			lines.push(`Remote only: ${filePath}`);
 			totalChanges += 1;
 			if (hunkBudget <= 0) truncated = true;
-			else appendHunks(contentHunks("", fileText(remote, filePath), hunkBudget));
-		} else if (!remoteMap.has(filePath)) {
+			else appendHunks(contentHunks("", remote.get(filePath) ?? "", hunkBudget));
+		} else if (!remote.has(filePath)) {
 			lines.push(`Local only: ${filePath}`);
 			totalChanges += 1;
 			if (hunkBudget <= 0) truncated = true;
-			else appendHunks(contentHunks("", fileText(local, filePath), hunkBudget));
-		} else if (localMap.get(filePath) !== remoteMap.get(filePath)) {
+			else appendHunks(contentHunks("", local.get(filePath) ?? "", hunkBudget));
+		} else if (local.get(filePath) !== remote.get(filePath)) {
 			lines.push(`Different: ${filePath}`);
 			totalChanges += 1;
 			if (hunkBudget <= 0) truncated = true;
 			else {
-				const texts = diffTexts(fileText(remote, filePath), fileText(local, filePath));
+				const texts = diffTexts(remote.get(filePath), local.get(filePath));
 				appendHunks(contentHunks(texts.before, texts.after, hunkBudget));
 			}
 		}
@@ -80,10 +72,6 @@ export function formatSnapshotDiff(local: Snapshot, remote: Snapshot): string {
 	if (totalChanges === 0) lines.push("No file differences.");
 	else if (truncated) lines.push("(content hunks truncated; all changed paths are listed)");
 	return lines.join("\n");
-}
-
-function fileText(snapshot: Snapshot, filePath: string): string {
-	return snapshotFileContent(snapshot, filePath) ?? "";
 }
 
 function diffTexts(before: string | undefined, after: string | undefined) {

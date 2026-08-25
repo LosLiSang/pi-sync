@@ -1,6 +1,3 @@
-import { planMerge } from "./merge.js";
-import type { Snapshot } from "./snapshot.js";
-
 export type SyncStateLabel =
 	| "unconfigured"
 	| "unknown"
@@ -17,36 +14,86 @@ export interface SyncStatusInfo {
 	conflicts: number;
 }
 
+export interface StateClassify {
+	label: SyncStateLabel;
+	ahead: number;
+	behind: number;
+	conflicts: number;
+	/** Paths where only the local side changed (local "wins" / pushable). */
+	localChanged: string[];
+	/** Paths where only the remote side changed (pullable). */
+	remoteChanged: string[];
+	/** Paths where both sides changed on the same path (needs a real merge). */
+	diverged: string[];
+}
+
 /**
- * Derive the sync state from the local snapshot, the remote snapshot, and the
- * base snapshot (the last remote revision we applied). A missing remote means
- * nothing has ever been published; divergent or two-sided changes are a
- * conflict, one-sided changes are ahead (push) or behind (pull).
+ * Classify the sync state by three-way comparing the agent file tree against
+ * the remote branch, using git's real merge-base as the base. Unlike the old
+ * snapshot design (which used a local state.json anchor), the base here is the
+ * true common ancestor, so a fresh machine or a rewritten remote never
+ * produces a false conflict.
+ *
+ * `base` is the content map at the merge-base (empty when there is none, e.g.
+ * a brand-new branch with no shared history). A path present in local & remote
+ * with different content and no base is conservatively a divergence.
  */
-export function deriveSyncStatus(
-	local: Snapshot,
-	remote: Snapshot | undefined,
-	base: Snapshot | undefined,
-): SyncStatusInfo {
-	if (!remote) {
-		return { label: "unpublished", ahead: 0, behind: 0, conflicts: 0 };
-	}
-	const plan = planMerge(local, remote, base);
-	if (plan.conflicts.length > 0 || (plan.takeLocal.length > 0 && plan.takeRemote.length > 0)) {
+export function classifyState(
+	local: Map<string, string>,
+	remote: Map<string, string>,
+	base: Map<string, string>,
+	mergePending: boolean,
+): StateClassify {
+	if (mergePending) {
+		const diverged = [...new Set([...local.keys(), ...remote.keys()])].filter(
+			(p) => local.get(p) !== remote.get(p),
+		);
 		return {
 			label: "conflict",
-			ahead: plan.takeLocal.length,
-			behind: plan.takeRemote.length,
-			conflicts: plan.conflicts.length,
+			ahead: 0,
+			behind: 0,
+			conflicts: diverged.length,
+			localChanged: [],
+			remoteChanged: [],
+			diverged,
 		};
 	}
-	if (plan.takeLocal.length > 0) {
-		return { label: "ahead", ahead: plan.takeLocal.length, behind: 0, conflicts: 0 };
+	const paths = [...new Set([...local.keys(), ...remote.keys()])].sort();
+	const localChanged: string[] = [];
+	const remoteChanged: string[] = [];
+	const diverged: string[] = [];
+	for (const filePath of paths) {
+		const localContent = local.get(filePath);
+		const remoteContent = remote.get(filePath);
+		if (localContent === remoteContent) continue;
+		const baseContent = base.get(filePath);
+		const localChangedSide = baseContent !== undefined ? localContent !== baseContent : true;
+		const remoteChangedSide = baseContent !== undefined ? remoteContent !== baseContent : true;
+		if (localChangedSide && remoteChangedSide) diverged.push(filePath);
+		else if (localChangedSide) localChanged.push(filePath);
+		else if (remoteChangedSide) remoteChanged.push(filePath);
 	}
-	if (plan.takeRemote.length > 0) {
-		return { label: "behind", ahead: 0, behind: plan.takeRemote.length, conflicts: 0 };
+
+	let label: SyncStateLabel;
+	if (remote.size === 0) label = "unpublished";
+	else if (diverged.length > 0 || (localChanged.length > 0 && remoteChanged.length > 0)) {
+		label = "conflict";
+	} else if (remoteChanged.length > 0) {
+		label = "behind";
+	} else if (localChanged.length > 0) {
+		label = "ahead";
+	} else {
+		label = "up-to-date";
 	}
-	return { label: "up-to-date", ahead: 0, behind: 0, conflicts: 0 };
+	return {
+		label,
+		ahead: localChanged.length,
+		behind: remoteChanged.length,
+		conflicts: diverged.length,
+		localChanged,
+		remoteChanged,
+		diverged,
+	};
 }
 
 /** Status-bar text while a background/foreground sync action is in flight. */

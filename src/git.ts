@@ -2,8 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { SyncConfig } from "./config.js";
-import { mirrorRepoDir, snapshotFilePath, stateDir } from "./config.js";
-import type { Snapshot } from "./snapshot.js";
+import { mirrorRepoDir, stateDir } from "./config.js";
 
 const GIT_TIMEOUT_MS = 60_000;
 const COMMIT_IDENTITY = { name: "pi-sync", email: "pi-sync@local" };
@@ -113,16 +112,61 @@ export async function runGit(args: string[], options: GitRunOptions = {}): Promi
 	}
 }
 
-/** Ensure the local mirror repository exists, is initialized, and knows the remote. */
+function gitCwd(): string {
+	return mirrorRepoDir();
+}
+
+/** Ensure the mirror repo exists, is initialized and knows the remote. */
 export async function ensureMirror(config: SyncConfig): Promise<void> {
 	await fs.mkdir(stateDir(), { recursive: true });
 	const repo = mirrorRepoDir();
 	if (!(await pathExists(repo))) {
 		await fs.mkdir(repo, { recursive: true });
 		await runGit(["init", "-b", "main"], { cwd: repo });
-		await runGit(["remote", "add", "origin", config.remote], { cwd: repo });
 	}
-	await runGit(["remote", "set-url", "origin", config.remote], { cwd: repo });
+	// Never let git re-write line endings in the mirror; config content must
+	// round-trip byte-exactly between the agent dir and the remote.
+	await runGit(["config", "core.autocrlf", "false"], { cwd: repo });
+	await runGit(["config", "core.eol", "lf"], { cwd: repo });
+	await runGit(["config", "core.safecrlf", "false"], { cwd: repo });
+	await runGit(["remote", "set-url", "origin", config.remote], { cwd: repo }).catch(async () => {
+		await runGit(["remote", "add", "origin", config.remote], { cwd: repo });
+	});
+}
+
+/**
+ * Ensure the mirror work tree is checked out on the configured sync branch.
+ * When the branch does not exist locally but exists on the remote, the local
+ * branch is created tracking it (so a fresh machine starts equal to the remote
+ * — no false conflict). Otherwise the local branch starts empty. The remote is
+ * fetched first so origin/<branch> is up to date.
+ *
+ * Returns `fresh`=true when a local branch was just created (either tracking an
+ * existing remote branch, or an empty orphan). This signals the first sync on
+ * this machine, so a pull adopts the remote (clean checkout) instead of doing a
+ * three-way merge against an implicitly-empty base.
+ */
+export async function ensureBranch(
+	config: SyncConfig,
+	options: GitRunOptions = {},
+): Promise<{ fresh: boolean; remoteExists: boolean }> {
+	await ensureMirror(config);
+	await fetchRemote(config, options);
+	const repo = gitCwd();
+	const remoteRef = `refs/remotes/origin/${config.branch}`;
+	const remoteExists = await refExists(remoteRef, options);
+	if (!(await branchExists(config.branch))) {
+		if (remoteExists) {
+			await runGit(["checkout", "-B", config.branch, "-t", remoteRef], {
+				cwd: repo,
+				signal: options.signal,
+			});
+			return { fresh: true, remoteExists };
+		}
+		await runGit(["checkout", "--orphan", config.branch], { cwd: repo, signal: options.signal });
+		return { fresh: true, remoteExists };
+	}
+	return { fresh: false, remoteExists };
 }
 
 /** Fetch the configured branch from the remote into origin/<branch>. */
@@ -130,7 +174,7 @@ export async function fetchRemote(config: SyncConfig, options: GitRunOptions = {
 	await ensureMirror(config);
 	try {
 		await runGit(["fetch", "--quiet", "origin", config.branch], {
-			cwd: mirrorRepoDir(),
+			cwd: gitCwd(),
 			signal: options.signal,
 			timeoutMs: options.timeoutMs,
 		});
@@ -143,55 +187,15 @@ export async function fetchRemote(config: SyncConfig, options: GitRunOptions = {
 	}
 }
 
-/** Read the remote snapshot for the branch; returns undefined when the branch has no snapshot. */
-export async function readRemoteSnapshot(
-	config: SyncConfig,
-	options: GitRunOptions = {},
-): Promise<Snapshot | undefined> {
-	const repo = mirrorRepoDir();
-	if (!(await pathExists(repo))) return undefined;
-	const ref = `refs/remotes/origin/${config.branch}`;
-	try {
-		const result = await runGit(["show", `${ref}:pi-sync/snapshot.json`], {
-			cwd: repo,
-			signal: options.signal,
-			timeoutMs: options.timeoutMs,
-		});
-		return JSON.parse(result.stdout) as Snapshot;
-	} catch (error) {
-		if (error instanceof GitCommandError && isMissingRefError(error.stderr)) return undefined;
-		throw error;
-	}
-}
-
-/** Read the snapshot stored at a specific revision; undefined when absent. */
-export async function readSnapshotAt(
-	revision: string,
-	options: GitRunOptions = {},
-): Promise<Snapshot | undefined> {
-	try {
-		const result = await runGit(["show", `${revision}:pi-sync/snapshot.json`], {
-			cwd: mirrorRepoDir(),
-			signal: options.signal,
-			timeoutMs: options.timeoutMs,
-		});
-		return JSON.parse(result.stdout) as Snapshot;
-	} catch (error) {
-		if (error instanceof GitCommandError && isMissingRefError(error.stderr)) return undefined;
-		throw error;
-	}
-}
-
-/** Remote revision (commit sha) for the branch, or undefined when the branch is absent. */
+/** Remote revision (commit sha) for the branch, or undefined when absent. */
 export async function readRemoteRevision(
 	config: SyncConfig,
 	options: GitRunOptions = {},
 ): Promise<string | undefined> {
 	if (!(await pathExists(mirrorRepoDir()))) return undefined;
-	const ref = `refs/remotes/origin/${config.branch}`;
 	try {
-		const result = await runGit(["rev-parse", ref], {
-			cwd: mirrorRepoDir(),
+		const result = await runGit(["rev-parse", `refs/remotes/origin/${config.branch}`], {
+			cwd: gitCwd(),
 			signal: options.signal,
 			timeoutMs: options.timeoutMs,
 		});
@@ -202,83 +206,217 @@ export async function readRemoteRevision(
 	}
 }
 
-/** Publish a snapshot to the remote branch as one commit. */
-export async function publishSnapshot(
+/** Read the file tree of the remote branch as a path→content map. */
+export async function readRemoteFiles(
 	config: SyncConfig,
-	snapshot: Snapshot,
 	options: GitRunOptions = {},
-	force = false,
-): Promise<string> {
-	const repo = mirrorRepoDir();
-	// The mirror is disposable (it only tracks pi-sync/snapshot.json). Advance
-	// it to the fetched remote tip so the publish push fast-forwards; the
-	// caller has already decided it is safe to publish. Missing ref = first push.
+): Promise<Map<string, string>> {
+	return readFilesAt(`refs/remotes/origin/${config.branch}`, options);
+}
+
+/** Read the file tree at a specific ref as a path→content map. */
+async function readFilesAt(ref: string, options: GitRunOptions = {}): Promise<Map<string, string>> {
+	const repo = gitCwd();
+	if (!(await pathExists(repo))) return new Map();
 	try {
-		await runGit(["reset", "--hard", `refs/remotes/origin/${config.branch}`], {
-			cwd: repo,
-			signal: options.signal,
-		});
-	} catch {
-		// Remote branch does not exist yet; publish from the empty HEAD.
-	}
-	// The mirror tracks only pi-sync/snapshot.json. The reset aligned the
-	// index to the remote tip, which may carry legacy or foreign paths;
-	// empty the index so the published commit never drags them along.
-	await runGit(["read-tree", "--empty"], { cwd: repo, signal: options.signal });
-	await fs.mkdir(path.dirname(snapshotFilePath()), { recursive: true });
-	await fs.writeFile(snapshotFilePath(), `${JSON.stringify(snapshot, null, "\t")}\n`, {
-		mode: 0o600,
-	});
-	await runGit(["add", "--", snapshotFilePath()], { cwd: repo, signal: options.signal });
-	await runGit(["commit", "--quiet", "-m", `pi-sync: ${snapshot.files.length} files`], {
-		cwd: repo,
-		signal: options.signal,
-	});
-	await runGit(
-		["push", "--quiet", ...(force ? ["--force"] : []), "origin", `HEAD:${config.branch}`],
-		{
+		const result = await runGit(["ls-tree", "-r", "--name-only", ref], {
 			cwd: repo,
 			signal: options.signal,
 			timeoutMs: options.timeoutMs,
-		},
-	);
-	// The pushed revision is the commit we just created on HEAD; the
-	// remote-tracking ref is only refreshed by fetch, so read HEAD directly.
-	const result = await runGit(["rev-parse", "HEAD"], {
-		cwd: repo,
-		signal: options.signal,
-	});
-	return result.stdout.trim();
-}
-
-/** List recent snapshot commits on the remote branch (newest first). */
-export async function listHistory(
-	options: GitRunOptions = {},
-): Promise<Array<{ id: string; date: string; message: string }>> {
-	try {
-		const result = await runGit(
-			["log", "--format=%H%x00%cI%x00%s", "-n", "20", "--", "pi-sync/snapshot.json"],
-			{ cwd: mirrorRepoDir(), signal: options.signal, timeoutMs: options.timeoutMs },
-		);
-		return result.stdout
-			.trim()
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => {
-				const [id, date, ...messageParts] = line.split("\u0000");
-				return { id: id ?? "", date: date ?? "", message: messageParts.join("\u0000") };
-			});
+		});
+		const entries = result.stdout.split("\n").filter(Boolean);
+		const map = new Map<string, string>();
+		for (const entry of entries) {
+			try {
+				const out = await runGit(["show", `${ref}:${entry}`], {
+					cwd: repo,
+					signal: options.signal,
+					timeoutMs: options.timeoutMs,
+				});
+				map.set(entry, out.stdout);
+			} catch {
+				// Binary or unreadable path — skip for the diff view.
+			}
+		}
+		return map;
 	} catch (error) {
-		if (error instanceof GitCommandError && isMissingRefError(error.stderr)) return [];
+		if (error instanceof GitCommandError && isMissingRefError(error.stderr)) return new Map();
 		throw error;
 	}
 }
 
-export function isRemoteUpToDate(
-	localRevision: string | undefined,
-	remoteRevision: string | undefined,
-): boolean {
-	return localRevision !== undefined && localRevision === remoteRevision;
+/**
+ * Read the content map at the merge-base of the local branch and the remote
+ * branch; empty when no shared ancestor exists (fresh branch).
+ */
+export async function readMergeBase(
+	config: SyncConfig,
+	options: GitRunOptions = {},
+): Promise<Map<string, string>> {
+	const repo = gitCwd();
+	const remoteRef = `refs/remotes/origin/${config.branch}`;
+	if (!(await pathExists(repo)) || !(await refExists(remoteRef, options))) return new Map();
+	let base: string;
+	try {
+		const result = await runGit(["merge-base", config.branch, remoteRef], {
+			cwd: repo,
+			signal: options.signal,
+			timeoutMs: options.timeoutMs,
+		});
+		base = result.stdout.trim();
+	} catch {
+		return new Map();
+	}
+	if (!base) return new Map();
+	return readFilesAt(base, options);
+}
+
+/** Stage all changes (after grafting the local side) in the mirror work tree. */
+export async function stageAll(options: GitRunOptions = {}): Promise<void> {
+	await runGit(["add", "-A"], { cwd: gitCwd(), signal: options.signal });
+}
+
+/** Commit the staged changes; returns false when nothing was staged. */
+export async function commitSync(message: string, options: GitRunOptions = {}): Promise<boolean> {
+	const repo = gitCwd();
+	const hasStaged = await hasStagedChanges(options);
+	if (!hasStaged) return false;
+	await runGit(["commit", "--quiet", "-m", message], { cwd: repo, signal: options.signal });
+	return true;
+}
+
+/**
+ * Publish the current local branch tip to the remote branch. Requires the
+ * local branch to be checked out; the caller commits the local side first.
+ * When `force` is false a non-fast-forward push is rejected by git.
+ */
+export async function pushBranch(
+	config: SyncConfig,
+	options: GitRunOptions = {},
+	force = false,
+): Promise<void> {
+	const repo = gitCwd();
+	await runGit(
+		["push", "--quiet", ...(force ? ["--force"] : []), "origin", `HEAD:${config.branch}`],
+		{ cwd: repo, signal: options.signal, timeoutMs: options.timeoutMs },
+	);
+}
+
+/**
+ * Merge origin/<branch> into the current branch (real three-way merge with
+ * merge-base from history). On conflict, git writes diff3/merge markers into
+ * the work tree files and leaves MERGE_HEAD set. Returns whether a real merge
+ * conflict is currently in progress (MERGE_HEAD set by git).
+ */
+export async function mergeRemote(
+	config: SyncConfig,
+	options: GitRunOptions = {},
+): Promise<boolean> {
+	const repo = gitCwd();
+	try {
+		await runGit(["merge", "--quiet", "--no-edit", `origin/${config.branch}`], {
+			cwd: repo,
+			signal: options.signal,
+			timeoutMs: options.timeoutMs,
+		});
+		return false;
+	} catch (error) {
+		// git merge exits non-zero on conflicts; MERGE_HEAD marks the conflict.
+		if (error instanceof GitCommandError) {
+			const mergeHead = await pathExists(path.join(repo, ".git", "MERGE_HEAD"));
+			if (mergeHead) return true;
+			throw error;
+		}
+		throw error;
+	}
+}
+
+/** List paths with unmerged (conflicted) entries after a failed merge. */
+export async function listConflictedPaths(options: GitRunOptions = {}): Promise<string[]> {
+	const result = await runGit(["diff", "--name-only", "--diff-filter=U"], {
+		cwd: gitCwd(),
+		signal: options.signal,
+	});
+	return result.stdout.split("\n").filter(Boolean);
+}
+
+/** Complete an in-progress merge: stage the resolved work tree and commit. */
+export async function completeMerge(
+	message: string,
+	options: GitRunOptions = {},
+): Promise<boolean> {
+	await stageAll(options);
+	return commitSync(message, options);
+}
+
+/** Abort an in-progress merge, restoring the work tree to the pre-merge state. */
+export async function abortMerge(options: GitRunOptions = {}): Promise<void> {
+	await runGit(["merge", "--abort"], { cwd: gitCwd(), signal: options.signal });
+}
+
+/** Reset the work tree to the remote tip (used by pull --force). */
+export async function resetHard(config: SyncConfig, options: GitRunOptions = {}): Promise<void> {
+	await runGit(["reset", "--hard", `refs/remotes/origin/${config.branch}`], {
+		cwd: gitCwd(),
+		signal: options.signal,
+	});
+}
+
+/** True when git has an unmerged (conflicted) merge in progress. */
+export async function isMergeInProgress(_options: GitRunOptions = {}): Promise<boolean> {
+	return pathExists(path.join(gitCwd(), ".git", "MERGE_HEAD"));
+}
+
+async function hasStagedChanges(options: GitRunOptions = {}): Promise<boolean> {
+	const result = await runGit(["diff", "--cached", "--name-only"], {
+		cwd: gitCwd(),
+		signal: options.signal,
+	});
+	return result.stdout.length > 0;
+}
+
+/**
+ * Commit-position summary of the local branch tip vs origin/<branch>.
+ * ahead = commits on the local branch not on the remote; behind = commits on
+ * the remote not on the local branch. A diverged state is ahead>0 && behind>0.
+ */
+export async function aheadBehind(
+	config: SyncConfig,
+	options: GitRunOptions = {},
+): Promise<{ ahead: number; behind: number }> {
+	const repo = gitCwd();
+	const remoteRef = `refs/remotes/origin/${config.branch}`;
+	if (!(await refExists(remoteRef, options))) return { ahead: 0, behind: 0 };
+	try {
+		const result = await runGit(
+			["rev-list", "--left-right", "--count", `${config.branch}...${remoteRef}`],
+			{ cwd: repo, signal: options.signal, timeoutMs: options.timeoutMs },
+		);
+		const [left, right] = result.stdout.trim().split(/\s+/u).map(Number) ?? [0, 0];
+		return { ahead: left ?? 0, behind: right ?? 0 };
+	} catch (error) {
+		if (error instanceof GitCommandError && isMissingRefError(error.stderr)) {
+			return { ahead: 0, behind: 0 };
+		}
+		throw error;
+	}
+}
+
+async function branchExists(name: string): Promise<boolean> {
+	const result = await runGit(["branch", "--list", name], { cwd: gitCwd() });
+	return result.stdout.trim().length > 0;
+}
+
+async function refExists(ref: string, options: GitRunOptions = {}): Promise<boolean> {
+	try {
+		await runGit(["rev-parse", "--verify", ref], {
+			cwd: gitCwd(),
+			signal: options.signal,
+		});
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -297,12 +435,7 @@ function isMissingRefError(stderr: string): boolean {
 		stderr.includes("bad revision") ||
 		stderr.includes("not a valid object name") ||
 		stderr.includes("invalid object name") ||
-		stderr.includes("does not exist in") ||
-		// git resolves <ref>:<path> by checking the working tree too: when the
-		// path is absent from the ref but a same-named file exists on disk it
-		// reports "exists on disk, but not in '<ref>'". Both mean the ref has
-		// no snapshot file.
-		stderr.includes("exists on disk, but not in")
+		stderr.includes("does not exist in")
 	);
 }
 
