@@ -76,7 +76,7 @@ async function computeState(config: SyncConfig, signal?: AbortSignal): Promise<S
 		readMergeBase(config, { signal }),
 		isMergeInProgress({ signal }),
 	]);
-	return classifyState(local, remote, base, mergePending);
+	return classifyState(local, remote, base, mergePending, config.include);
 }
 
 export async function status(
