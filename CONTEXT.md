@@ -23,7 +23,10 @@ _Avoid_: auto-sync status (a background sync that writes)
 Fetches the remote branch into the mirror and reports the content-level difference with the local side, without touching local files.
 
 **merge**:
-Completes an in-progress `git` merge. After `/sync pull` leaves conflict markers in the real files, the user resolves them (in place or externally), then `/sync merge` stages and commits the resolved tree. `--abort` discards the merge and restores the pre-merge state.
+Completes an in-progress `git` merge. After `/sync pull` detects conflicts, the local configuration is kept intact while conflicts remain in the mirror. Resolution happens via `/sync merge --ours` / `--theirs`, `/sync mergetool`, or manual editing. `/sync merge` strictly validates that no conflict markers remain and that JSON files parse cleanly before committing and applying to the agent directory. `--abort` discards the merge and restores the pre-merge state.
+
+**mergetool**:
+Launches git's native mergetool in the mirror work tree (`/sync mergetool [tool]`), supporting interactive tools like vimdiff, nvimdiff, or vscode.
 
 **pull**:
 Fetches and merges the remote branch into the mirror with a real three-way merge. Without conflicts it applies the result to the agent dir; `--force` overwrites local files with the remote tree. A fresh machine (first sync) adopts the remote cleanly instead of doing a three-way merge against an empty base. Automatic session-start observation never pulls — it only fetches.
@@ -36,8 +39,8 @@ Publishes the local file tree to the remote branch. Rejected when the remote cha
 Gates the non-destructive session-start observation (fetch or upstream check). Never applies changes by itself. With `automatic: false` no fetch happens at session start and the sync indicator shows only what manual commands last refreshed.
 _Avoid_: auto-sync, background sync (the old auto push/pull/merge behavior)
 
-**conflict resolution (native git, 闭环)**:
-Divergent edits surface as real diff3/merge conflict markers in the actual synced files. Resolution happens where the user observes the conflict — the file itself — rather than a separate UI screen. `/sync merge` completes the merge once the markers are gone.
+**conflict resolution (protected & guarded, 闭环)**:
+Divergent edits are isolated in the mirror work tree without corrupting live agent configurations with broken JSON. Conflicts can be resolved via `/sync merge --ours` / `--theirs`, `/sync mergetool`, or editing. `/sync merge` enforces a strict guard against unresolved conflict markers and invalid JSON syntax; only clean trees are committed and applied to the live agent directory.
 _Avoid_: dead-end diff, edit-elsewhere-without-a-commit-path
 
 **real file tree (真实文件树)**:

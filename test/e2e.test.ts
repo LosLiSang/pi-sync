@@ -84,7 +84,7 @@ test("fetch then diff shows content-level changes", async () => {
 	assert.match(message, /changed/u);
 	const onDisk = readAgentFile("settings.json");
 	assert.equal(onDisk, '{"theme":"dark"}\n'); // fetch is non-destructive
-});
+}, 15_000);
 
 test("fresh machine pull adopts the remote (no false conflict)", async () => {
 	// Machine A publishes.
@@ -188,11 +188,16 @@ test("a real divergence is a merge conflict that /sync merge completes", async (
 	writeAgentFile("settings.json", '{"theme":"local"}\n');
 
 	const pulled = await operations.pull(ctx(), cfg);
-	assert.equal(pulled.merged, true);
+	assert.equal(pulled.merged, false);
 	assert.ok(pulled.conflicts?.includes("settings.json"));
 	assert.equal(await isMergeInProgress(), true);
-	// Local never silently changed; the file carries conflict markers.
-	assert.match(readAgentFile("settings.json"), /<<<<<<</u);
+	// Local configuration is preserved; does not carry conflict markers!
+	assert.equal(readAgentFile("settings.json"), '{"theme":"local"}\n');
+
+	// Premature /sync merge without resolution is rejected by validation!
+	const premature = await operations.merge(ctx(), cfg);
+	assert.equal(premature.merged, false);
+	assert.equal(await isMergeInProgress(), true);
 
 	// Resolve externally: pick the local side, then /sync merge.
 	const resolved = '{"theme":"resolved"}\n';
@@ -201,6 +206,68 @@ test("a real divergence is a merge conflict that /sync merge completes", async (
 	assert.equal(merged.merged, true);
 	assert.equal(await isMergeInProgress(), false);
 	assert.equal(readAgentFile("settings.json"), resolved);
+}, 15_000);
+
+test("merge --ours resolves conflicts using local version", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	await simulateRemotePush({ "settings.json": '{"theme":"remote"}\n' });
+	writeAgentFile("settings.json", '{"theme":"local"}\n');
+
+	const pulled = await operations.pull(ctx(), cfg);
+	assert.equal(pulled.merged, false);
+	assert.equal(await isMergeInProgress(), true);
+
+	const merged = await operations.merge(ctx(), cfg, { ours: true });
+	assert.equal(merged.merged, true);
+	assert.equal(await isMergeInProgress(), false);
+	assert.equal(readAgentFile("settings.json"), '{"theme":"local"}\n');
+}, 15_000);
+
+test("merge --theirs resolves conflicts using remote version", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	await simulateRemotePush({ "settings.json": '{"theme":"remote"}\n' });
+	writeAgentFile("settings.json", '{"theme":"local"}\n');
+
+	const pulled = await operations.pull(ctx(), cfg);
+	assert.equal(pulled.merged, false);
+	assert.equal(await isMergeInProgress(), true);
+
+	const merged = await operations.merge(ctx(), cfg, { theirs: true });
+	assert.equal(merged.merged, true);
+	assert.equal(await isMergeInProgress(), false);
+	assert.equal(readAgentFile("settings.json"), '{"theme":"remote"}\n');
+}, 15_000);
+
+test("merge fails when invalid JSON is detected", async () => {
+	writeAgentFile("settings.json", '{"theme":"dark"}\n');
+	const cfg = await config();
+	await operations.push(ctx(), cfg);
+
+	await simulateRemotePush({ "settings.json": '{"theme":"remote"}\n' });
+	writeAgentFile("settings.json", '{"theme":"local"}\n');
+
+	await operations.pull(ctx(), cfg);
+	assert.equal(await isMergeInProgress(), true);
+
+	// Try resolving with invalid JSON in agent dir
+	writeAgentFile("settings.json", '{"theme": broken json\n');
+	const result = await operations.merge(ctx(), cfg);
+	assert.equal(result.merged, false);
+	assert.equal(await isMergeInProgress(), true);
+	assert.match(result.message, /invalid JSON syntax/u);
+
+	// Fix to valid JSON
+	writeAgentFile("settings.json", '{"theme":"valid"}\n');
+	const fixed = await operations.merge(ctx(), cfg);
+	assert.equal(fixed.merged, true);
+	assert.equal(await isMergeInProgress(), false);
+	assert.equal(readAgentFile("settings.json"), '{"theme":"valid"}\n');
 }, 15_000);
 
 test("status shows state and a next-step hint", async () => {

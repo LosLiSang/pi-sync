@@ -15,7 +15,17 @@ interface BackgroundSync {
 	settled: Promise<void>;
 }
 
-const COMMANDS = ["init", "status", "push", "pull", "fetch", "merge", "config", "help"] as const;
+const COMMANDS = [
+	"init",
+	"status",
+	"push",
+	"pull",
+	"fetch",
+	"merge",
+	"mergetool",
+	"config",
+	"help",
+] as const;
 
 type Subcommand = (typeof COMMANDS)[number];
 
@@ -30,7 +40,8 @@ const USAGE = [
 	"  status              config + sync state + next step (--diff for content)",
 	"  fetch               fetch the remote tree without applying",
 	"  pull                fetch + merge (--force overwrites local)",
-	"  merge               continue an in-progress merge (--abort discards)",
+	"  merge               complete merge (--abort, --ours, --theirs)",
+	"  mergetool           launch git mergetool for conflicts ([tool])",
 	"  push                publish local tree (--force overwrites remote)",
 	"  help                show this help",
 ].join("\n");
@@ -211,8 +222,15 @@ async function handleCommand(
 		case "merge":
 			await operations.merge(ctx, config, {
 				abort: restTokens.some((token) => token === "--abort"),
+				ours: restTokens.some((token) => token === "--ours"),
+				theirs: restTokens.some((token) => token === "--theirs"),
 			});
 			return;
+		case "mergetool": {
+			const tool = restTokens.find((token) => !token.startsWith("-"));
+			await operations.mergetool(ctx, config, tool);
+			return;
+		}
 		case "config":
 			await runConfigEditor(ctx.ui, config);
 			return;

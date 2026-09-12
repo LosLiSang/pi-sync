@@ -18,8 +18,10 @@ detection and merging are handled by git itself.
   anchor file. A new machine's first `pull` adopts the remote cleanly; a
   rewritten remote doesn't spuriously conflict.
 - **Git-native three-way merge** — `/sync pull` merges the remote branch into
-  the local side. Divergent edits produce real conflict markers in the actual
-  files; `/sync merge` completes once you resolve them, `--abort` discards.
+  the local side. Divergent edits keep local configuration protected while
+  holding conflicts in the mirror; `/sync mergetool` or `--ours`/`--theirs`
+  resolve them, and `/sync merge` validates (no markers, valid JSON) before
+  applying to local files.
 - **Deliberate commands** — nothing moves your files without being asked;
   `automatic` only observes at session start.
 - **Sensible defaults** — one `pi-sync.json` points at a git remote and branch,
@@ -46,7 +48,8 @@ pi install npm:@lisang233/pi-sync
 /sync status       # config + sync state + next step (--diff for content)
 /sync fetch        # pull the remote tree without applying
 /sync pull         # fetch + merge (--force overwrites local)
-/sync merge        # complete an in-progress merge (--abort discards)
+/sync mergetool    # launch git mergetool for conflicts ([tool])
+/sync merge        # complete merge (--abort, --ours, --theirs)
 /sync push         # publish the local tree (--force overwrites remote)
 ```
 

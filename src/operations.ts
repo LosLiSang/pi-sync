@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import type {
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -10,15 +12,19 @@ import { diffSummary, formatDiff } from "./diff.js";
 import {
 	abortMerge,
 	aheadBehind,
+	checkoutOurs,
+	checkoutTheirs,
 	commitSync,
 	completeMerge,
 	ensureBranch,
 	ensureMirror,
 	fetchRemote,
 	isMergeInProgress,
+	launchMergetool,
 	listConflictedPaths,
 	mergeRemote,
 	pushBranch,
+	readCommitFile,
 	readMergeBase,
 	readRemoteFiles,
 	readRemoteRevision,
@@ -30,6 +36,8 @@ import {
 	collectAgentFiles,
 	copyMirrorToAgent,
 	graftAgentIntoMirror,
+	mirrorProjectedFiles,
+	mirrorTarget,
 	readAgentContents,
 } from "./tree.js";
 
@@ -116,7 +124,7 @@ function nextStepHint(info: StateClassify): string {
 		case "behind":
 			return "next: /sync pull to fetch and apply remote changes";
 		case "conflict":
-			return "next: /sync pull to merge, or /sync pull --force to overwrite local";
+			return "next: /sync merge (--ours, --theirs, or mergetool), or /sync pull --force to overwrite local";
 		case "unknown":
 			return "next: /sync fetch to check the remote";
 	}
@@ -209,10 +217,8 @@ export async function pull(
 	await commitLocalSide({ signal: ctx.signal });
 
 	const conflicted = await mergeRemote(config, { signal: ctx.signal });
-	await copyMirrorToAgent(config);
-	await refreshIndicator(ctx, config);
-
 	if (conflicted) {
+		await refreshIndicator(ctx, config);
 		const conflicts = await listConflictedPaths({ signal: ctx.signal });
 		let remoteRevision = "";
 		try {
@@ -220,13 +226,15 @@ export async function pull(
 		} catch {
 			// ignore
 		}
-		const message = `Merge conflict in ${conflicts.length} file(s). Resolve the markers, then /sync merge. (remote ${shortId(
+		const conflictList = conflicts.length > 0 ? ` (${conflicts.join(", ")})` : "";
+		const message = `Merge conflict in ${conflicts.length} file(s)${conflictList}. Local configuration was preserved. Resolve with /sync merge --ours, /sync merge --theirs, or /sync mergetool. Then run /sync merge. (remote ${shortId(
 			remoteRevision,
 		)})`;
 		ctx.ui.notify(message, "warning");
-		return { pushed: false, pulled: false, merged: true, message, conflicts };
+		return { pushed: false, pulled: false, merged: false, message, conflicts };
 	}
 
+	await copyMirrorToAgent(config);
 	await refreshIndicator(ctx, config);
 	const remote = await readRemoteFiles(config, { signal: ctx.signal });
 	const message = `Pulled ${remote.size} file(s) from ${config.branch}.`;
@@ -267,10 +275,78 @@ export async function fetch(
 	return { pushed: false, pulled: false, merged: false, message };
 }
 
+export interface FileValidationError {
+	path: string;
+	line?: number;
+	reason: string;
+}
+
+/**
+ * Validate that the mirror work tree has resolved all conflicts and produced
+ * valid JSON for any .json files before allowing completeMerge to commit.
+ */
+export async function validateResolvedMirror(
+	config: SyncConfig,
+	signal?: AbortSignal,
+): Promise<FileValidationError[]> {
+	const errors: FileValidationError[] = [];
+	const unmerged = await listConflictedPaths({ signal });
+	for (const file of unmerged) {
+		errors.push({ path: file, reason: "unmerged git conflict" });
+	}
+
+	const projected = await mirrorProjectedFiles(config);
+	for (const relative of projected) {
+		const fullPath = mirrorTarget(relative);
+		let content: string;
+		try {
+			content = await fs.readFile(fullPath, "utf8");
+		} catch {
+			continue;
+		}
+
+		const lines = content.split(/\r?\n/u);
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			if (
+				line.startsWith("<<<<<<<") ||
+				line.startsWith("=======") ||
+				line.startsWith(">>>>>>>") ||
+				line.startsWith("|||||||")
+			) {
+				errors.push({
+					path: relative,
+					line: i + 1,
+					reason: `unresolved conflict marker: ${line.slice(0, 12).trim()}`,
+				});
+				break;
+			}
+		}
+
+		if (relative.toLowerCase().endsWith(".json")) {
+			try {
+				JSON.parse(content);
+			} catch (err) {
+				errors.push({
+					path: relative,
+					reason: `invalid JSON syntax: ${(err as Error).message}`,
+				});
+			}
+		}
+	}
+	return errors;
+}
+
+export interface MergeOptions {
+	abort?: boolean;
+	ours?: boolean;
+	theirs?: boolean;
+}
+
 export async function merge(
 	ctx: CommandContext,
 	config: SyncConfig,
-	options: { abort?: boolean } = {},
+	options: MergeOptions = {},
 ): Promise<SyncResult> {
 	if (options.abort) {
 		if (!(await isMergeInProgress({ signal: ctx.signal }))) {
@@ -279,7 +355,6 @@ export async function merge(
 			return { pushed: false, pulled: false, merged: false, message };
 		}
 		await abortMerge({ signal: ctx.signal });
-		await copyMirrorToAgent(config);
 		await refreshIndicator(ctx, config);
 		const message = "Merge aborted; local files restored to the pre-merge state.";
 		ctx.ui.notify(message, "info");
@@ -293,19 +368,88 @@ export async function merge(
 		return { pushed: false, pulled: false, merged: false, message };
 	}
 
-	// The user resolved conflicts in the real agent files; graft the resolved
-	// tree back into the mirror, then commit to complete the merge.
-	const files = await collectAgentFiles(config);
-	await graftAgentIntoMirror(config, files);
-	await stageAll({ signal: ctx.signal });
+	if (options.ours && options.theirs) {
+		const message = "Cannot specify both --ours and --theirs.";
+		ctx.ui.notify(message, "error");
+		return { pushed: false, pulled: false, merged: false, message };
+	}
+
+	if (options.ours) {
+		await checkoutOurs({ signal: ctx.signal });
+	} else if (options.theirs) {
+		await checkoutTheirs({ signal: ctx.signal });
+	} else {
+		// Graft any user modifications from the agent directory into mirror if the
+		// user manually edited the agent file while resolving.
+		const localFiles = await collectAgentFiles(config);
+		for (const file of localFiles) {
+			try {
+				const agentContent = await fs.readFile(file.source, "utf8");
+				const headContent = await readCommitFile("HEAD", file.path, { signal: ctx.signal });
+				if (headContent === undefined || agentContent !== headContent) {
+					const target = mirrorTarget(file.path);
+					await fs.mkdir(path.dirname(target), { recursive: true });
+					await fs.writeFile(target, agentContent, "utf8");
+				}
+			} catch {
+				// Unreadable file — ignore
+			}
+		}
+		await stageAll({ signal: ctx.signal });
+	}
+
+	// Validate mirror files before completing merge.
+	const errors = await validateResolvedMirror(config, ctx.signal);
+	if (errors.length > 0) {
+		const errorDetails = errors
+			.slice(0, 5)
+			.map((e) => `  - ${e.path}${e.line ? `:${e.line}` : ""}: ${e.reason}`)
+			.join("\n");
+		const message = `Cannot complete merge: ${errors.length} unresolved issue(s) detected.\n${errorDetails}\nResolve them or run /sync merge --abort.`;
+		ctx.ui.notify(message, "error");
+		return { pushed: false, pulled: false, merged: false, message };
+	}
+
 	const completed = await completeMerge(LOCAL_COMMIT_MESSAGE, { signal: ctx.signal });
 	await copyMirrorToAgent(config);
 	await refreshIndicator(ctx, config);
 	const message = completed
-		? "Merge completed. Run /sync push to publish."
+		? "Merge completed. Applied cleanly to local configuration. Run /sync push to publish."
 		: "Merge has no further changes to record. Run /sync push to publish.";
 	ctx.ui.notify(message, "info");
 	return { pushed: false, pulled: false, merged: true, message };
+}
+
+export async function mergetool(
+	ctx: CommandContext,
+	config: SyncConfig,
+	tool?: string,
+): Promise<SyncResult> {
+	if (!(await isMergeInProgress({ signal: ctx.signal }))) {
+		const message =
+			"No merge in progress. Run /sync pull to merge remote changes into local files.";
+		ctx.ui.notify(message, "info");
+		return { pushed: false, pulled: false, merged: false, message };
+	}
+
+	try {
+		await launchMergetool(tool, { signal: ctx.signal });
+		await refreshIndicator(ctx, config);
+		const conflicts = await listConflictedPaths({ signal: ctx.signal });
+		if (conflicts.length === 0) {
+			ctx.ui.notify("Mergetool finished. Run /sync merge to validate and apply.", "info");
+		} else {
+			ctx.ui.notify(
+				`Mergetool finished, but ${conflicts.length} file(s) still conflicted.`,
+				"warning",
+			);
+		}
+		return { pushed: false, pulled: false, merged: false, message: "mergetool" };
+	} catch (error) {
+		const message = `Failed to run mergetool: ${error instanceof Error ? error.message : String(error)}`;
+		ctx.ui.notify(message, "error");
+		return { pushed: false, pulled: false, merged: false, message };
+	}
 }
 
 function describeChanges(summary: ReturnType<typeof diffSummary>): string {

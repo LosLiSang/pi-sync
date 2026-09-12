@@ -271,6 +271,25 @@ export async function readMergeBase(
 	return readFilesAt(base, options);
 }
 
+/** Read the content of a file at a specific git ref (e.g. "HEAD:settings.json"). */
+export async function readCommitFile(
+	ref: string,
+	relativePath: string,
+	options: GitRunOptions = {},
+): Promise<string | undefined> {
+	const repo = gitCwd();
+	try {
+		const out = await runGit(["show", `${ref}:${relativePath}`], {
+			cwd: repo,
+			signal: options.signal,
+			timeoutMs: options.timeoutMs,
+		});
+		return out.stdout;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Stage all changes (after grafting the local side) in the mirror work tree. */
 export async function stageAll(options: GitRunOptions = {}): Promise<void> {
 	await runGit(["add", "-A"], { cwd: gitCwd(), signal: options.signal });
@@ -346,7 +365,49 @@ export async function completeMerge(
 	options: GitRunOptions = {},
 ): Promise<boolean> {
 	await stageAll(options);
-	return commitSync(message, options);
+	const repo = gitCwd();
+	try {
+		await runGit(["commit", "--quiet", "-m", message], { cwd: repo, signal: options.signal });
+		return true;
+	} catch {
+		return !(await isMergeInProgress(options));
+	}
+}
+
+/** Check out our local version for all conflicted files in the mirror work tree. */
+export async function checkoutOurs(options: GitRunOptions = {}): Promise<void> {
+	await runGit(["checkout", "--ours", "--", "."], { cwd: gitCwd(), signal: options.signal });
+	await stageAll(options);
+}
+
+/** Check out their remote version for all conflicted files in the mirror work tree. */
+export async function checkoutTheirs(options: GitRunOptions = {}): Promise<void> {
+	await runGit(["checkout", "--theirs", "--", "."], { cwd: gitCwd(), signal: options.signal });
+	await stageAll(options);
+}
+
+/**
+ * Launch git mergetool interactively in the mirror work tree.
+ */
+export async function launchMergetool(tool?: string, options: GitRunOptions = {}): Promise<void> {
+	throwIfAborted(options.signal);
+	const repo = gitCwd();
+	const args = ["mergetool", "-y"];
+	if (tool && tool.trim().length > 0) {
+		args.push(`--tool=${tool.trim()}`);
+	}
+	await new Promise<void>((resolve, reject) => {
+		const child = spawn("git", args, {
+			cwd: repo,
+			stdio: process.stdin.isTTY ? "inherit" : ["ignore", "pipe", "pipe"],
+			windowsHide: false,
+		});
+		child.on("error", reject);
+		child.on("close", (code) => {
+			if (code === 0) resolve();
+			else reject(new Error(`git mergetool exited with status ${code ?? "unknown"}.`));
+		});
+	});
 }
 
 /** Abort an in-progress merge, restoring the work tree to the pre-merge state. */

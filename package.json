@@ -1,6 +1,6 @@
 {
 	"name": "@lisang233/pi-sync",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "Personal Pi extension that syncs Pi configuration through Git with background auto-sync and git-style fetch/merge conflict handling.",
 	"type": "module",
 	"license": "MIT",
@@ -16,6 +16,9 @@
 		"README.md",
 		"LICENSE"
 	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"pi": {
 		"extensions": [
 			"./src/index.ts"
