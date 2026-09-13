@@ -20,7 +20,6 @@ import {
 	ensureMirror,
 	fetchRemote,
 	isMergeInProgress,
-	launchMergetool,
 	listConflictedPaths,
 	mergeRemote,
 	pushBranch,
@@ -126,7 +125,7 @@ function nextStepHint(info: StateClassify): string {
 		case "behind":
 			return "next: /sync pull to fetch and apply remote changes";
 		case "conflict":
-			return "next: /sync merge (--ours, --theirs, or mergetool), or /sync pull --force to overwrite local";
+			return "next: /sync merge (--ours or --theirs), or /sync pull --force to overwrite local";
 		case "unknown":
 			return "next: /sync fetch to check the remote";
 	}
@@ -229,7 +228,7 @@ export async function pull(
 			// ignore
 		}
 		const conflictList = conflicts.length > 0 ? ` (${conflicts.join(", ")})` : "";
-		const message = `Merge conflict in ${conflicts.length} file(s)${conflictList}. Local configuration in ${agentDir()} was preserved. Resolve with /sync merge --ours, /sync merge --theirs, or /sync mergetool. Then run /sync merge. (remote ${shortId(
+		const message = `Merge conflict in ${conflicts.length} file(s)${conflictList}. Local configuration in ${agentDir()} was preserved. Edit files or resolve with /sync merge --ours / --theirs. Then run /sync merge. (remote ${shortId(
 			remoteRevision,
 		)})`;
 		ctx.ui.notify(message, "warning");
@@ -415,7 +414,6 @@ export async function merge(
 			"Or choose a resolution strategy:",
 			"  /sync merge --ours     (keep local configuration)",
 			"  /sync merge --theirs   (use remote configuration)",
-			"  /sync mergetool        (open 3-way merge tool)",
 			"  /sync merge --abort    (discard merge and restore)",
 		].join("\n");
 		ctx.ui.notify(message, "error");
@@ -430,38 +428,6 @@ export async function merge(
 		: "Merge has no further changes to record. Run /sync push to publish.";
 	ctx.ui.notify(message, "info");
 	return { pushed: false, pulled: false, merged: true, message };
-}
-
-export async function mergetool(
-	ctx: CommandContext,
-	config: SyncConfig,
-	tool?: string,
-): Promise<SyncResult> {
-	if (!(await isMergeInProgress({ signal: ctx.signal }))) {
-		const message =
-			"No merge in progress. Run /sync pull to merge remote changes into local files.";
-		ctx.ui.notify(message, "info");
-		return { pushed: false, pulled: false, merged: false, message };
-	}
-
-	try {
-		await launchMergetool(tool, { signal: ctx.signal });
-		await refreshIndicator(ctx, config);
-		const conflicts = await listConflictedPaths({ signal: ctx.signal });
-		if (conflicts.length === 0) {
-			ctx.ui.notify("Mergetool finished. Run /sync merge to validate and apply.", "info");
-		} else {
-			ctx.ui.notify(
-				`Mergetool finished, but ${conflicts.length} file(s) still conflicted.`,
-				"warning",
-			);
-		}
-		return { pushed: false, pulled: false, merged: false, message: "mergetool" };
-	} catch (error) {
-		const message = `Failed to run mergetool: ${error instanceof Error ? error.message : String(error)}`;
-		ctx.ui.notify(message, "error");
-		return { pushed: false, pulled: false, merged: false, message };
-	}
 }
 
 function describeChanges(summary: ReturnType<typeof diffSummary>): string {

@@ -77,7 +77,7 @@ test("a pending merge forces the conflict label", () => {
 	const remote = map({ "settings.json": '{"theme":"remote"}\n' });
 	const info = classifyState(local, remote, base, true, INCLUDE);
 	assert.equal(info.label, "conflict");
-	assert.equal(syncIndicatorText(info), "sync: conflict (1) — /sync merge or mergetool");
+	assert.equal(syncIndicatorText(info), "sync: conflict (1) — /sync merge");
 });
 
 // --- Regression: legacy out-of-include remnants (old single-snapshot paths) ---

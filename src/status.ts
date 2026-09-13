@@ -135,6 +135,6 @@ export function syncIndicatorText(info: SyncStatusInfo): string {
 		case "behind":
 			return `sync: ${info.behind} behind — pull`;
 		case "conflict":
-			return `sync: conflict (${info.conflicts}) — /sync merge or mergetool`;
+			return `sync: conflict (${info.conflicts}) — /sync merge`;
 	}
 }

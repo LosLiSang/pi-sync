@@ -386,30 +386,6 @@ export async function checkoutTheirs(options: GitRunOptions = {}): Promise<void>
 	await stageAll(options);
 }
 
-/**
- * Launch git mergetool interactively in the mirror work tree.
- */
-export async function launchMergetool(tool?: string, options: GitRunOptions = {}): Promise<void> {
-	throwIfAborted(options.signal);
-	const repo = gitCwd();
-	const args = ["mergetool", "-y"];
-	if (tool && tool.trim().length > 0) {
-		args.push(`--tool=${tool.trim()}`);
-	}
-	await new Promise<void>((resolve, reject) => {
-		const child = spawn("git", args, {
-			cwd: repo,
-			stdio: process.stdin.isTTY ? "inherit" : ["ignore", "pipe", "pipe"],
-			windowsHide: false,
-		});
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code === 0) resolve();
-			else reject(new Error(`git mergetool exited with status ${code ?? "unknown"}.`));
-		});
-	});
-}
-
 /** Abort an in-progress merge, restoring the work tree to the pre-merge state. */
 export async function abortMerge(options: GitRunOptions = {}): Promise<void> {
 	await runGit(["merge", "--abort"], { cwd: gitCwd(), signal: options.signal });
