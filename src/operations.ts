@@ -6,7 +6,7 @@ import type {
 	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import type { SyncConfig } from "./config.js";
-import { shortId, stateDir } from "./config.js";
+import { mirrorRepoDir, shortId, stateDir } from "./config.js";
 import { formatConfig } from "./config-ui.js";
 import { diffSummary, formatDiff } from "./diff.js";
 import {
@@ -33,7 +33,6 @@ import {
 import { agentDir } from "./paths.js";
 import { classifyState, type StateClassify, syncIndicatorText } from "./status.js";
 import {
-	agentTarget,
 	collectAgentFiles,
 	copyMirrorToAgent,
 	graftAgentIntoMirror,
@@ -228,9 +227,13 @@ export async function pull(
 			// ignore
 		}
 		const conflictList = conflicts.length > 0 ? ` (${conflicts.join(", ")})` : "";
-		const message = `Merge conflict in ${conflicts.length} file(s)${conflictList}. Local configuration in ${agentDir()} was preserved. Edit files or resolve with /sync merge --ours / --theirs. Then run /sync merge. (remote ${shortId(
-			remoteRevision,
-		)})`;
+		const message = [
+			`Merge conflict in ${conflicts.length} file(s)${conflictList}.`,
+			`Local configuration in ${agentDir()} was preserved clean and untouched.`,
+			`Conflict markers are in mirror: ${mirrorRepoDir()}`,
+			"Resolve with /sync merge --ours / --theirs, or edit the mirror file, then /sync merge.",
+			`(remote ${shortId(remoteRevision)})`,
+		].join("\n");
 		ctx.ui.notify(message, "warning");
 		return { pushed: false, pulled: false, merged: false, message, conflicts };
 	}
@@ -404,13 +407,16 @@ export async function merge(
 	if (errors.length > 0) {
 		const errorDetails = errors
 			.slice(0, 5)
-			.map((e) => `  - ${agentTarget(e.path)}${e.line ? `:${e.line}` : ""}: ${e.reason}`)
+			.map((e) => `  - ${mirrorTarget(e.path)}${e.line ? `:${e.line}` : ""}: ${e.reason}`)
 			.join("\n");
 		const message = [
 			`Cannot complete merge: ${errors.length} unresolved issue(s) detected.`,
 			errorDetails,
 			"",
-			`To resolve manually, edit files in: ${agentDir()}`,
+			`Conflicted file(s) with markers are in mirror:`,
+			`  ${mirrorRepoDir()}`,
+			"",
+			"To resolve manually, edit the file in mirror above (or edit your local file directly).",
 			"Or choose a resolution strategy:",
 			"  /sync merge --ours     (keep local configuration)",
 			"  /sync merge --theirs   (use remote configuration)",
